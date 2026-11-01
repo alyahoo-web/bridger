@@ -1,0 +1,385 @@
+<!-- tests-storage.html: browser tests for storage.js and the bundled deals; they never touch the real saved data. -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>storage.js tests</title>
+<style>
+  body { font: 15px/1.4 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; margin: 16px; color: #14181f; }
+  #summary { font-size: 20px; font-weight: 800; margin: 8px 0 14px; }
+  #summary.pass { color: #1b7a34; }
+  #summary.fail { color: #c62828; }
+  ul { list-style: none; padding: 0; margin: 0; }
+  li { padding: 6px 8px; border-bottom: 1px solid #e3e6ea; }
+  li.pass:before { content: "PASS  "; color: #1b7a34; font-weight: 700; }
+  li.fail:before { content: "FAIL  "; color: #c62828; font-weight: 700; }
+  li .why { display: block; color: #c62828; font-size: 13px; margin-top: 2px; word-break: break-word; }
+</style>
+</head>
+<body>
+<h1>storage.js tests</h1>
+<div id="summary">Running...</div>
+<ul id="out"></ul>
+<script src="cards.js"></script>
+<script src="storage.js"></script>
+<script>
+(function () {
+  'use strict';
+  var Bridge = window.Bridge;
+  var SEATS = Bridge.SEATS;
+  var tests = [];
+
+  function test(name, fn) { tests.push({ name: name, fn: fn }); }
+  function ok(cond, msg) { if (!cond) throw new Error(msg || 'Assertion failed'); }
+  function eq(actual, expected, msg) {
+    if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+      throw new Error((msg || 'Not equal') + ': expected ' + JSON.stringify(expected) + ', got ' + JSON.stringify(actual));
+    }
+  }
+  function throws(fn, msg) {
+    var threw = false;
+    try { fn(); } catch (e) { threw = true; }
+    if (!threw) throw new Error(msg || 'Expected an error');
+  }
+  function clone(x) { return JSON.parse(JSON.stringify(x)); }
+  function fresh() { return Bridge.createStore({ memory: true }); }
+  function seeds() { return Bridge.buildSeedDeals(); }
+  function R(taken, needed) { return { tricksTaken: taken, tricksNeeded: needed, made: taken >= needed }; }
+
+  // ------------------------------------------------------------ deal id (from cards.js, used by storage.js)
+
+  test('id: reordering the cards in a hand gives the same id', function () {
+    var s = seeds()[0];
+    var id = Bridge.dealId(s.deal, s.contract);
+    var reversed = {};
+    SEATS.forEach(function (seat) { reversed[seat] = s.deal[seat].slice().reverse(); });
+    eq(Bridge.dealId(reversed, s.contract), id);
+    var rotated = {};
+    SEATS.forEach(function (seat) { var h = s.deal[seat].slice(); h.push(h.shift()); rotated[seat] = h; });
+    eq(Bridge.dealId(rotated, s.contract), id);
+    eq(Bridge.dealId(Bridge.parsePBNDeal(Bridge.formatPBNDeal(s.deal, 'E')), s.contract), id, 'PBN round trip');
+  });
+
+  test('id: changing any one card changes the id', function () {
+    var s = seeds()[0];
+    var id = Bridge.dealId(s.deal, s.contract);
+    SEATS.forEach(function (seat, si) {
+      var other = SEATS[(si + 1) % 4];
+      s.deal[seat].forEach(function (card, i) {
+        var d = clone(s.deal); // swap this card with the first card of the next hand: still a legal deal
+        var t = d[seat][i]; d[seat][i] = d[other][0]; d[other][0] = t;
+        ok(Bridge.dealId(d, s.contract) !== id, 'swapping ' + card + ' did not change the id');
+      });
+    });
+  });
+
+  test('id: changing the contract changes the id', function () {
+    var s = seeds()[0];
+    var id = Bridge.dealId(s.deal, s.contract);
+    [{ level: 4 }, { strain: 'S' }, { doubled: 1 }, { declarer: 'N' }].forEach(function (change) {
+      var c = clone(s.contract);
+      Object.keys(change).forEach(function (k) { c[k] = change[k]; });
+      ok(Bridge.dealId(s.deal, c) !== id, 'changing ' + Object.keys(change)[0] + ' did not change the id');
+    });
+  });
+
+  test('id: dealer, vulnerability, auction and source do not change the id', function () {
+    var st = fresh();
+    var s = seeds()[1];
+    var r1 = st.saveDeal(s);
+    var other = clone(s);
+    other.dealer = 'W'; other.vulnerability = { NS: true, EW: true }; other.auction = []; other.source = 'shared';
+    var r2 = st.saveDeal(other);
+    eq(r1.added, true); eq(r2.added, false); eq(r2.id, r1.id);
+    eq(st.listDeals().length, 1);
+  });
+
+  test('id: storage.js uses Bridge.dealId', function () {
+    var orig = Bridge.dealId, calls = 0, st = fresh(), s = seeds()[2], res;
+    Bridge.dealId = function (d, c) { calls++; return orig(d, c); };
+    try { res = st.saveDeal(s); } finally { Bridge.dealId = orig; }
+    ok(calls > 0, 'Bridge.dealId was not called');
+    eq(res.id, orig(s.deal, s.contract));
+    eq(st.loadDeal(res.id).id, res.id);
+  });
+
+  // ------------------------------------------------------------ save, load, list
+
+  test('save, load and list stored deals', function () {
+    var st = fresh(), s = seeds();
+    eq(st.listDeals(), []);
+    var r = st.saveDeal(s[0]);
+    eq(r.added, true);
+    var back = st.loadDeal(r.id);
+    eq(back, s[0], 'loaded deal equals the saved one');
+    ok(st.loadDeal('nope') === null, 'unknown id gives null');
+    st.saveDeal(s[1]);
+    eq(st.listDeals().length, 2);
+    back.dealer = 'W'; // changing a returned copy must not change the store
+    eq(st.loadDeal(r.id).dealer, 'N');
+  });
+
+  test('saving an invalid deal is refused', function () {
+    var st = fresh(), s = seeds()[0], bad;
+    bad = clone(s); bad.deal.N[0] = bad.deal.N[1];
+    throws(function () { st.saveDeal(bad); }, 'duplicate card accepted');
+    bad = clone(s); bad.dealer = 'X';
+    throws(function () { st.saveDeal(bad); }, 'bad dealer accepted');
+    bad = clone(s); bad.source = 'magic';
+    throws(function () { st.saveDeal(bad); }, 'bad source accepted');
+    bad = clone(s); bad.vulnerability = { NS: 1, EW: 0 };
+    throws(function () { st.saveDeal(bad); }, 'bad vulnerability accepted');
+    bad = clone(s); bad.auction = 'P P P';
+    throws(function () { st.saveDeal(bad); }, 'bad auction accepted');
+    eq(st.listDeals().length, 0);
+  });
+
+  // ------------------------------------------------------------ results, records and status
+
+  test('result ranking: made beats failed, then more tricks', function () {
+    ok(Bridge.isBetterResult(R(6, 9), null), 'anything beats no result');
+    ok(Bridge.isBetterResult(R(9, 9), R(8, 9)), 'made beats failed');
+    ok(!Bridge.isBetterResult(R(8, 9), R(9, 9)), 'failed does not beat made');
+    ok(Bridge.isBetterResult(R(8, 9), R(7, 9)), 'more tricks is better among failures');
+    ok(!Bridge.isBetterResult(R(7, 9), R(8, 9)), 'fewer tricks is not better among failures');
+    ok(Bridge.isBetterResult(R(10, 9), R(9, 9)), 'more tricks is better among made');
+    ok(!Bridge.isBetterResult(R(9, 9), R(10, 9)), 'fewer tricks is not better among made');
+    ok(!Bridge.isBetterResult(R(9, 9), R(9, 9)), 'equal is not better');
+    ok(Bridge.isBetterResult(R(7, 7), R(6, 12)), 'made beats failed even with fewer tricks');
+  });
+
+  test('saveResult updates attempts, lastResult, bestResult and lastPlayed', function () {
+    var st = fresh(), id = st.saveDeal(seeds()[0]).id;
+    ok(st.getRecord(id) === null, 'no record before playing');
+    var steps = [
+      [R(6, 9), 6], [R(8, 9), 8], [R(7, 9), 8], [R(9, 9), 9], [R(8, 9), 9], [R(10, 9), 10], [R(9, 9), 10]
+    ];
+    steps.forEach(function (step, i) {
+      var before = Date.now();
+      var rec = st.saveResult(id, step[0]);
+      eq(rec.dealId, id);
+      eq(rec.attempts, i + 1, 'attempts after step ' + (i + 1));
+      eq(rec.lastResult, step[0], 'lastResult after step ' + (i + 1));
+      eq(rec.bestResult.tricksTaken, step[1], 'best after step ' + (i + 1));
+      ok(new Date(rec.lastPlayed).toISOString() === rec.lastPlayed, 'lastPlayed is an ISO string');
+      ok(Math.abs(new Date(rec.lastPlayed).getTime() - before) < 5000, 'lastPlayed is about now');
+      eq(st.getRecord(id), rec, 'getRecord matches');
+    });
+  });
+
+  test('status: unplayed, then failed, then made (and stays made)', function () {
+    var st = fresh(), id = st.saveDeal(seeds()[0]).id;
+    eq(st.getStatus(id), 'unplayed');
+    st.saveResult(id, R(7, 9)); eq(st.getStatus(id), 'failed');
+    st.saveResult(id, R(9, 9)); eq(st.getStatus(id), 'made');
+    st.saveResult(id, R(5, 9)); eq(st.getStatus(id), 'made', 'a later failure does not undo made');
+    eq(st.getStatus('unknown-id'), 'unplayed');
+  });
+
+  test('saveResult refuses unknown deals and bad results, changing nothing', function () {
+    var st = fresh(), id = st.saveDeal(seeds()[0]).id;
+    throws(function () { st.saveResult('nope', R(9, 9)); });
+    throws(function () { st.saveResult(id, { tricksTaken: 'nine', tricksNeeded: 9, made: true }); });
+    throws(function () { st.saveResult(id, { tricksTaken: 9, tricksNeeded: 9 }); });
+    throws(function () { st.saveResult(id, null); });
+    ok(st.getRecord(id) === null, 'no record was created');
+    eq(st.getStatus(id), 'unplayed');
+  });
+
+  // ------------------------------------------------------------ export and persistence
+
+  test('export includes stored deals and play records', function () {
+    var st = fresh(), s = seeds(), id0 = st.saveDeal(s[0]).id, id1 = st.saveDeal(s[1]).id;
+    st.saveResult(id0, R(9, 9));
+    st.saveResult(id0, R(8, 9));
+    var out = JSON.parse(st.exportAll());
+    eq(out.version, 1);
+    eq(out.deals.length, 2);
+    eq(out.deals.map(function (d) { return d.id; }), [id0, id1]);
+    eq(out.playRecords.length, 1);
+    eq(out.playRecords[0].dealId, id0);
+    eq(out.playRecords[0].attempts, 2);
+    eq(out.deals[0], s[0], 'deal data is complete');
+    var empty = JSON.parse(fresh().exportAll());
+    eq(empty, { version: 1, deals: [], playRecords: [] });
+  });
+
+  test('data persists: a new store on the same storage sees it', function () {
+    var backend = Bridge.memoryBackend();
+    var a = Bridge.createStore({ backend: backend, prefix: 't:' }), s = seeds();
+    var id = a.saveDeal(s[0]).id; a.saveDeal(s[1]);
+    a.saveResult(id, R(7, 9));
+    var b = Bridge.createStore({ backend: backend, prefix: 't:' });
+    eq(b.listDeals(), a.listDeals());
+    eq(b.getRecord(id), a.getRecord(id));
+    eq(b.getStatus(id), 'failed');
+    eq(b.exportAll(), a.exportAll());
+    eq(b.getNotice(), '');
+  });
+
+  // ------------------------------------------------------------ unavailable or corrupt storage
+
+  function savedStore() { // a backend holding good data, plus its raw text
+    var backend = Bridge.memoryBackend();
+    var st = Bridge.createStore({ backend: backend, prefix: 't:' }), s = seeds();
+    var id = st.saveDeal(s[0]).id;
+    st.saveResult(id, R(9, 9));
+    return { backend: backend, raw: backend.getItem('t:data'), id: id };
+  }
+
+  function expectNoticeAndStillWorks(store, backend, rawBefore) {
+    ok(store.getNotice().length > 0, 'a notice is shown');
+    eq(store.listDeals(), [], 'nothing is loaded');
+    var id = store.saveDeal(seeds()[1]).id; // the app keeps working
+    store.saveResult(id, R(9, 9));
+    eq(store.getStatus(id), 'made');
+    if (backend) eq(backend.getItem('t:data'), rawBefore, 'unreadable data was not overwritten');
+  }
+
+  test('corrupt data: text that is not JSON', function () {
+    var backend = Bridge.memoryBackend();
+    backend.setItem('t:data', '{not json');
+    expectNoticeAndStillWorks(Bridge.createStore({ backend: backend, prefix: 't:' }), backend, '{not json');
+  });
+
+  test('corrupt data: valid JSON of the wrong shape', function () {
+    var base = savedStore();
+    var variants = [
+      function (o) { o.deals = 5; },
+      function (o) { o.version = 99; },
+      function (o) { var k = Object.keys(o.deals)[0]; o.deals[k].id = 'other'; },
+      function (o) { var k = Object.keys(o.deals)[0]; o.deals[k].deal.N[0] = o.deals[k].deal.N[1]; },
+      function (o) { var k = Object.keys(o.records)[0]; o.records[k].attempts = 'three'; },
+      function (o) { var k = Object.keys(o.records)[0]; o.records[k].bestResult = { tricksTaken: 1 }; }
+    ];
+    variants.forEach(function (change, i) {
+      var backend = Bridge.memoryBackend(), obj = JSON.parse(base.raw);
+      change(obj);
+      var raw = JSON.stringify(obj);
+      backend.setItem('t:data', raw);
+      try { expectNoticeAndStillWorks(Bridge.createStore({ backend: backend, prefix: 't:' }), backend, raw); }
+      catch (e) { throw new Error('variant ' + (i + 1) + ': ' + e.message); }
+    });
+    var nullBackend = Bridge.memoryBackend(); nullBackend.setItem('t:data', 'null');
+    expectNoticeAndStillWorks(Bridge.createStore({ backend: nullBackend, prefix: 't:' }), nullBackend, 'null');
+  });
+
+  test('unavailable storage: no storage, reads that throw, writes that throw', function () {
+    expectNoticeAndStillWorks(Bridge.createStore({ backend: null }), null);
+    var noRead = { getItem: function () { throw new Error('blocked'); }, setItem: function () { throw new Error('blocked'); } };
+    expectNoticeAndStillWorks(Bridge.createStore({ backend: noRead }), null);
+    var noWrite = { getItem: function () { return null; }, setItem: function () { throw new Error('quota'); } };
+    var st = Bridge.createStore({ backend: noWrite });
+    eq(st.getNotice(), '', 'no notice until a save fails');
+    var id = st.saveDeal(seeds()[0]).id; // must not throw
+    ok(st.getNotice().length > 0, 'a notice appears when saving fails');
+    eq(st.loadDeal(id).id, id, 'the deal is still usable in memory');
+    st.saveResult(id, R(9, 9));
+    eq(st.getStatus(id), 'made');
+  });
+
+  test('tests use their own key and leave the real saved data alone', function () {
+    var real;
+    try { real = window.localStorage; real.getItem('x'); } catch (e) { real = null; }
+    if (!real) return; // no localStorage here: nothing to check
+    var realKey = 'bridge-practice:data', testKey = 'bridge-test:data';
+    var before = real.getItem(realKey);
+    try {
+      var st = Bridge.createStore({ prefix: 'bridge-test:' });
+      var id = st.saveDeal(seeds()[0]).id;
+      st.saveResult(id, R(9, 9));
+      ok(real.getItem(testKey) !== null, 'the test store wrote under its own key');
+      eq(real.getItem(realKey), before, 'the real key is untouched');
+      eq(Bridge.createStore({ prefix: 'bridge-test:' }).getStatus(id), 'made', 'real localStorage round trip');
+    } finally {
+      real.removeItem(testKey);
+    }
+  });
+
+  // ------------------------------------------------------------ bundled deals and seeding
+
+  test('seed deals: 13 distinct cards per hand and all 52 cards exactly once', function () {
+    var list = seeds();
+    eq(list.length, 4, 'four bundled deals');
+    var deck = Bridge.makeDeck ? Bridge.makeDeck() : null;
+    list.forEach(function (s, n) {
+      var count = {};
+      SEATS.forEach(function (seat) {
+        var hand = s.deal[seat];
+        eq(hand.length, 13, 'deal ' + (n + 1) + ' ' + seat + ' has 13 cards');
+        eq(new Set(hand).size, 13, 'deal ' + (n + 1) + ' ' + seat + ' has 13 distinct cards');
+        hand.forEach(function (c) {
+          ok(/^[SHDC][AKQJT98765432]$/.test(c), 'deal ' + (n + 1) + ': bad card ' + c);
+          count[c] = (count[c] || 0) + 1;
+        });
+      });
+      eq(Object.keys(count).length, 52, 'deal ' + (n + 1) + ' has 52 different cards');
+      Object.keys(count).forEach(function (c) { eq(count[c], 1, 'deal ' + (n + 1) + ': ' + c + ' appears once'); });
+      if (deck) deck.forEach(function (c) { ok(count[typeof c === 'string' ? c : c.suit + c.rank] === 1, 'deal ' + (n + 1) + ' is missing a card'); });
+    });
+  });
+
+  test('seed deals: complete, valid stored deals with varied contracts', function () {
+    var list = seeds(), ids = {};
+    list.forEach(function (s, n) {
+      eq(s.source, 'library');
+      eq(s.id, Bridge.dealId(s.deal, s.contract), 'id is derived');
+      ids[s.id] = true;
+      Bridge.formatPBNRecord(s); // throws if the contract, vulnerability or auction is invalid
+    });
+    eq(Object.keys(ids).length, 4, 'four different ids');
+    ok(list.some(function (s) { return s.contract.strain === 'NT'; }), 'a no-trump contract');
+    ok(list.some(function (s) { return s.contract.strain !== 'NT'; }), 'a suit contract');
+    ok(list.some(function (s) { return s.auction.length > 0; }), 'at least one real auction');
+    var first = list[0];
+    eq(first.deal, Bridge.parsePBNDeal('N:AK42.A53.K63.874 976.T86.T872.QT9 Q53.KQ4.AQ4.A652 JT8.J972.J95.KJ3'), 'first is the original deal');
+    eq(first.contract, { level: 3, strain: 'NT', doubled: 0, declarer: 'S' });
+  });
+
+  test('seeding adds the four deals once and never duplicates', function () {
+    var backend = Bridge.memoryBackend();
+    var st = Bridge.createStore({ backend: backend, prefix: 't:' });
+    eq(st.seedIfEmpty(seeds()), 4);
+    eq(st.listDeals().length, 4);
+    eq(st.seedIfEmpty(seeds()), 0, 'second seeding adds nothing');
+    seeds().forEach(function (s) { eq(st.saveDeal(s).added, false, 'saving a seed again adds nothing'); });
+    eq(st.listDeals().length, 4);
+    var again = Bridge.createStore({ backend: backend, prefix: 't:' }); // simulates a reload
+    eq(again.seedIfEmpty(seeds()), 0);
+    eq(again.listDeals().length, 4);
+    var other = fresh();
+    other.saveDeal(seeds()[2]);
+    eq(other.seedIfEmpty(seeds()), 0, 'a store that already has a deal is not seeded');
+    eq(other.listDeals().length, 1);
+  });
+
+  // ------------------------------------------------------------ run
+
+  var out = document.getElementById('out');
+  var summary = document.getElementById('summary');
+  var passed = 0, failed = 0;
+  tests.forEach(function (t) {
+    var li = document.createElement('li');
+    try {
+      t.fn();
+      li.className = 'pass';
+      li.textContent = t.name;
+      passed++;
+    } catch (e) {
+      li.className = 'fail';
+      li.textContent = t.name;
+      var why = document.createElement('span');
+      why.className = 'why';
+      why.textContent = e.message;
+      li.appendChild(why);
+      failed++;
+    }
+    out.appendChild(li);
+  });
+  summary.textContent = failed === 0 ? 'All ' + passed + ' tests passed' : failed + ' failed, ' + passed + ' passed';
+  summary.className = failed === 0 ? 'pass' : 'fail';
+})();
+</script>
+</body>
+</html>

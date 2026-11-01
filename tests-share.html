@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>share.js tests</title>
+<style>
+  body { font: 16px/1.4 system-ui, sans-serif; margin: 16px; max-width: 900px; }
+  #summary { font-size: 1.4em; font-weight: 700; }
+  #summary.pass { color: #0a7a2f; }
+  #summary.fail { color: #b00020; }
+  table { border-collapse: collapse; width: 100%; }
+  td { border-top: 1px solid #ccc; padding: 4px 8px; vertical-align: top; }
+  td.ok { color: #0a7a2f; font-weight: 600; width: 3em; }
+  td.bad { color: #b00020; font-weight: 600; width: 3em; }
+  pre { margin: 4px 0 0; white-space: pre-wrap; word-break: break-all; font-size: 13px; }
+</style>
+</head>
+<body>
+<h1>share.js tests</h1>
+<p id="summary">Running...</p>
+<table id="results"></table>
+
+<!-- Same folder as these files. storage.js is only used by the last test. -->
+<script src="cards.js"></script>
+<script src="storage.js"></script>
+<script src="share.js"></script>
+<script>
+(function () {
+  'use strict';
+  var B = window.Bridge;
+  var results = [];
+
+  function test(name, fn) {
+    try { fn(); results.push({ name: name, ok: true, msg: '' }); }
+    catch (e) { results.push({ name: name, ok: false, msg: String((e && e.message) || e) }); }
+  }
+  function assert(cond, msg) { if (!cond) throw new Error(msg || 'assertion failed'); }
+  function same(got, expected, msg) {
+    var a = JSON.stringify(got), b = JSON.stringify(expected);
+    if (a !== b) throw new Error((msg || 'not equal') + '\n  got:      ' + a + '\n  expected: ' + b);
+  }
+  // decodeShare must throw a deliberate Error (not a TypeError etc.) with a message.
+  function rejects(input, fragment) {
+    var threw = false, err = null;
+    try { B.decodeShare(input); } catch (e) { threw = true; err = e; }
+    assert(threw, 'did not throw');
+    assert(err instanceof Error && Object.getPrototypeOf(err) === Error.prototype,
+           'threw ' + (err && err.name) + ' (a code bug), not a plain Error');
+    assert(typeof err.message === 'string' && err.message.length > 0, 'empty error message');
+    if (fragment) {
+      assert(err.message.toLowerCase().indexOf(fragment.toLowerCase()) !== -1,
+             'message "' + err.message + '" should mention "' + fragment + '"');
+    }
+  }
+  function encodeRejects(stored) {
+    var threw = false, err = null;
+    try { B.encodeShare(stored); } catch (e) { threw = true; err = e; }
+    assert(threw, 'did not throw');
+    assert(err instanceof Error && Object.getPrototypeOf(err) === Error.prototype,
+           'threw ' + (err && err.name) + ' (a code bug), not a plain Error');
+  }
+
+  // Small seeded random generator so a failure can be reproduced.
+  function mulberry32(seed) {
+    var a = seed >>> 0;
+    return function () {
+      a = (a + 0x6D2B79F5) >>> 0;
+      var t = a;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  function randomStored(rng) {
+    function pick(list) { return list[Math.floor(rng() * list.length)]; }
+    return {
+      deal: B.dealRandom(rng),
+      dealer: pick(B.SEATS),
+      vulnerability: { NS: rng() < 0.5, EW: rng() < 0.5 },
+      auction: [],
+      contract: {
+        level: 1 + Math.floor(rng() * 7),
+        strain: pick(['C', 'D', 'H', 'S', 'NT']),
+        doubled: Math.floor(rng() * 3),
+        declarer: pick(B.SEATS)
+      }
+    };
+  }
+  function core(s) { return { deal: s.deal, dealer: s.dealer, vulnerability: s.vulnerability, contract: s.contract }; }
+  function storedFrom(pbn, contract, dealer, vul) {
+    return { deal: B.parsePBNDeal(pbn), dealer: dealer, vulnerability: vul, auction: [], contract: contract };
+  }
+
+  var PBN1 = 'N:AK42.A53.K63.874 976.T86.T872.QT9 Q53.KQ4.AQ4.A652 JT8.J972.J95.KJ3';
+  var GOOD = 'BP1:AK42.A53.K63.874,976.T86.T872.QT9,Q53.KQ4.AQ4.A652,JT8.J972.J95.KJ3:3NT:S:S:-';
+  var PBN2 = 'N:Q973.A64.K54.K43 T6.JT8.QJ9.QJT98 AKJ84.KQ5.A32.76 52.9732.T876.A52';
+  var KNOWN2 = 'BP1:Q973.A64.K54.K43,T6.JT8.QJ9.QJT98,AKJ84.KQ5.A32.76,52.9732.T876.A52:4SX:E:E:ALL';
+  var PBN3 = 'N:AKQJT98765432.-.-.- -.AKQJT98765432.-.- -.-.AKQJT98765432.- -.-.-.AKQJT98765432';
+  var KNOWN3 = 'BP1:AKQJT98765432.-.-.-,-.AKQJT98765432.-.-,-.-.AKQJT98765432.-,-.-.-.AKQJT98765432:7NTXX:W:N:NS';
+
+  /* ---------- round trips ---------- */
+
+  test('round trip: 3000 random deals, contracts, dealers, vulnerabilities', function () {
+    var rng = mulberry32(20260101);
+    for (var i = 0; i < 3000; i++) {
+      var s = randomStored(rng);
+      var code = B.encodeShare(s);
+      assert(/^BP1:[A-Za-z0-9.,:\-]+$/.test(code), 'unsafe characters in ' + code);
+      assert(code.length <= 100, 'code unexpectedly long (' + code.length + '): ' + code);
+      var d = B.decodeShare(code);
+      same(core(d), core(s), 'round trip changed the data for ' + code);
+      same(d.auction, [], 'auction should be empty');
+      same(d.id, B.dealId(s.deal, s.contract), 'id differs for ' + code);
+      same(B.encodeShare(d), code, 'not canonical: re-encoding changed ' + code);
+      var viaUrl = B.decodeShare(B.shareUrl(s, 'https://example.com/app/index.html?x=1#old'));
+      same(core(viaUrl), core(s), 'URL round trip failed for ' + code);
+      var viaEscaped = B.decodeShare(encodeURIComponent(code));
+      same(core(viaEscaped), core(s), '%-escaped round trip failed for ' + code);
+    }
+  });
+
+  test('encodeShare does not change its input', function () {
+    var s = randomStored(mulberry32(7));
+    var before = JSON.stringify(s);
+    B.encodeShare(s);
+    B.shareUrl(s, 'https://example.com/');
+    same(JSON.stringify(s), before);
+  });
+
+  /* ---------- fixed known strings ---------- */
+
+  test('known string 1: 3NT by S, dealer S, nobody vulnerable', function () {
+    var s = storedFrom(PBN1, { level: 3, strain: 'NT', doubled: 0, declarer: 'S' }, 'S', { NS: false, EW: false });
+    same(B.encodeShare(s), GOOD);
+    var d = B.decodeShare(GOOD);
+    same(d.contract, { level: 3, strain: 'NT', doubled: 0, declarer: 'S' });
+    same(d.dealer, 'S');
+    same(d.vulnerability, { NS: false, EW: false });
+    same(B.formatPBNDeal(d.deal, 'N'), PBN1);
+  });
+
+  test('known string 2: 4S doubled by E, dealer E, all vulnerable', function () {
+    var s = storedFrom(PBN2, { level: 4, strain: 'S', doubled: 1, declarer: 'E' }, 'E', { NS: true, EW: true });
+    same(B.encodeShare(s), KNOWN2);
+    var d = B.decodeShare(KNOWN2);
+    same(d.contract, { level: 4, strain: 'S', doubled: 1, declarer: 'E' });
+    same(d.dealer, 'E');
+    same(d.vulnerability, { NS: true, EW: true });
+    same(B.formatPBNDeal(d.deal, 'N'), PBN2);
+  });
+
+  test('known string 3: all voids, 7NT redoubled by W, dealer N, NS vulnerable', function () {
+    var s = storedFrom(PBN3, { level: 7, strain: 'NT', doubled: 2, declarer: 'W' }, 'N', { NS: true, EW: false });
+    same(B.encodeShare(s), KNOWN3);
+    var d = B.decodeShare(KNOWN3);
+    same(d.contract, { level: 7, strain: 'NT', doubled: 2, declarer: 'W' });
+    same(d.dealer, 'N');
+    same(d.vulnerability, { NS: true, EW: false });
+    same(d.deal.N.length + d.deal.E.length + d.deal.S.length + d.deal.W.length, 52);
+  });
+
+  test('shareUrl replaces any old hash and keeps the query', function () {
+    var s = B.decodeShare(GOOD);
+    same(B.shareUrl(s, 'https://example.com/a/index.html?x=1#old'), 'https://example.com/a/index.html?x=1#' + GOOD);
+    same(B.shareUrl(s, 'file:///tmp/index.html'), 'file:///tmp/index.html#' + GOOD);
+  });
+
+  /* ---------- accepted input forms ---------- */
+
+  test('accepts hash, URL, %-escaped, padded and line-wrapped forms', function () {
+    var want = B.decodeShare(GOOD).id;
+    var forms = [
+      '#' + GOOD,
+      'https://example.com/index.html?a=b#' + GOOD,
+      'https://example.com/#' + encodeURIComponent(GOOD),
+      encodeURIComponent(GOOD),
+      '  \n' + GOOD + '\n  ',
+      GOOD.slice(0, 30) + '\n' + GOOD.slice(30, 60) + '\r\n' + GOOD.slice(60)
+    ];
+    forms.forEach(function (f) { same(B.decodeShare(f).id, want, 'form failed: ' + JSON.stringify(f)); });
+  });
+
+  /* ---------- bad input: decodeShare must throw a clear Error, never crash ---------- */
+
+  var BAD = [
+    ['empty string', '', 'empty'],
+    ['only white space', '  \n\t ', 'empty'],
+    ['only a hash', '#', 'empty'],
+    ['null', null, 'no text'],
+    ['undefined', undefined, 'no text'],
+    ['a number', 42, 'no text'],
+    ['an object', {}, 'no text'],
+    ['an array', [GOOD], 'no text'],
+    ['plain words', 'hello', 'does not look like'],
+    ['a URL with an unrelated hash', 'https://example.com/#top', 'does not look like'],
+    ['a script tag', '<script>alert(1)<\/script>', 'does not look like'],
+    ['lower-case prefix', GOOD.toLowerCase(), 'does not look like'],
+    ['unknown version BP2', 'BP2' + GOOD.slice(3), 'version'],
+    ['version BP0', 'BP0' + GOOD.slice(3), 'version'],
+    ['prefix only', 'BP1', 'expected 6 parts'],
+    ['extra field', GOOD + ':extra', 'expected 6 parts'],
+    ['missing last field', GOOD.slice(0, GOOD.lastIndexOf(':')), 'expected 6 parts'],
+    ['three hands', 'BP1:AK42.A53.K63.874,976.T86.T872.QT9,Q53.KQ4.AQ4.A652:3NT:S:S:-', 'four hands'],
+    ['five hands', GOOD.replace(',JT8.J972.J95.KJ3:', ',JT8.J972.J95.KJ3,AK42.A53.K63.874:'), 'four hands'],
+    ['12 cards in North', GOOD.replace('AK42.A53.K63.874', 'AK4.A53.K63.874'), 'not a valid deal'],
+    ['14 cards in North', GOOD.replace('AK42.A53.K63.874', 'AK42.A53.K63.8743'), 'not a valid deal'],
+    ['duplicate card, 13 each', GOOD.replace('QT9', 'QT8'), 'not a valid deal'],
+    ['same hand twice', GOOD.replace('976.T86.T872.QT9', 'AK42.A53.K63.874'), 'not a valid deal'],
+    ['invalid rank character', GOOD.replace('T86', '186'), 'not written correctly'],
+    ['lower-case rank', GOOD.replace('QT9', 'Qt9'), 'not written correctly'],
+    ['three suits in a hand', GOOD.replace('AK42.A53.K63.874', 'AK42.A53.K63874'), 'not written correctly'],
+    ['five suits in a hand', GOOD.replace('AK42.A53.K63.874', 'AK42.A53.K63.8.74'), 'not written correctly'],
+    ['empty suit instead of -', GOOD.replace('AK42.A53.K63.874', 'AK42.A53..874'), 'not written correctly'],
+    ['unicode instead of a rank', GOOD.replace('AK42', '\u2660K42'), 'not written correctly'],
+    ['empty hand', GOOD.replace('AK42.A53.K63.874', ''), 'not written correctly'],
+    ['contract level 0', GOOD.replace(':3NT:', ':0NT:'), 'contract'],
+    ['contract level 8', GOOD.replace(':3NT:', ':8NT:'), 'contract'],
+    ['contract level 10', GOOD.replace(':3NT:', ':10NT:'), 'contract'],
+    ['contract unknown strain', GOOD.replace(':3NT:', ':3Z:'), 'contract'],
+    ['contract lower case', GOOD.replace(':3NT:', ':3nt:'), 'contract'],
+    ['contract tripled', GOOD.replace(':3NT:', ':3NTXXX:'), 'contract'],
+    ['contract Pass', GOOD.replace(':3NT:', ':Pass:'), 'contract'],
+    ['contract empty', GOOD.replace(':3NT:', '::'), 'contract'],
+    ['declarer Q', GOOD.replace(':3NT:S:S:', ':3NT:Q:S:'), 'declarer'],
+    ['declarer NS', GOOD.replace(':3NT:S:S:', ':3NT:NS:S:'), 'declarer'],
+    ['declarer empty', GOOD.replace(':3NT:S:S:', ':3NT::S:'), 'declarer'],
+    ['dealer X', GOOD.replace(':3NT:S:S:', ':3NT:S:X:'), 'dealer'],
+    ['dealer lower case', GOOD.replace(':3NT:S:S:', ':3NT:S:s:'), 'dealer'],
+    ['vulnerability BOTH', GOOD.slice(0, -1) + 'BOTH', 'vulnerability'],
+    ['vulnerability empty', GOOD.slice(0, -1), 'vulnerability'],
+    ['code too long', 'BP1:' + new Array(300).join('A'), 'too long'],
+    ['text far too long', new Array(5000).join('x'), 'too long'],
+    ['broken % escape', 'BP1%3A%E0%A4%A', 'damaged'],
+    ['lone % sign', '#%', 'damaged']
+  ];
+  BAD.forEach(function (c) {
+    test('rejects: ' + c[0], function () { rejects(c[1], c[2]); });
+  });
+
+  test('rejects: 500 randomly damaged codes without crashing', function () {
+    var rng = mulberry32(99);
+    var junk = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,:-%#<>"\' \u2660\u00e9';
+    for (var i = 0; i < 500; i++) {
+      var chars = GOOD.split('');
+      var edits = 1 + Math.floor(rng() * 3);
+      for (var k = 0; k < edits; k++) {
+        var pos = Math.floor(rng() * chars.length);
+        var mode = Math.floor(rng() * 3);
+        var ch = junk.charAt(Math.floor(rng() * junk.length));
+        if (mode === 0) chars[pos] = ch;
+        else if (mode === 1) chars.splice(pos, 1);
+        else chars.splice(pos, 0, ch);
+      }
+      var text = chars.join('');
+      // A damaged code may still happen to be valid. It must either decode to a
+      // full valid deal or throw a plain Error, and never anything else.
+      try {
+        var d = B.decodeShare(text);
+        assert(d.deal.N.length === 13 && d.deal.E.length === 13 && d.deal.S.length === 13 && d.deal.W.length === 13,
+               'decoded a deal without 13 cards per hand: ' + text);
+      } catch (e) {
+        assert(Object.getPrototypeOf(e) === Error.prototype && e.message,
+               'bad exception (' + (e && e.name) + ') for ' + JSON.stringify(text));
+      }
+    }
+  });
+
+  /* ---------- bad input: encodeShare ---------- */
+
+  test('encodeShare rejects invalid deals and contracts', function () {
+    var base = function () { return B.decodeShare(GOOD); };
+    var s;
+    encodeRejects(undefined);
+    encodeRejects(null);
+    encodeRejects('x');
+    s = base(); s.contract.level = 8; encodeRejects(s);
+    s = base(); s.contract.level = 2.5; encodeRejects(s);
+    s = base(); s.contract.strain = 'Z'; encodeRejects(s);
+    s = base(); s.contract.doubled = 3; encodeRejects(s);
+    s = base(); s.contract.declarer = 'X'; encodeRejects(s);
+    s = base(); s.contract = null; encodeRejects(s);
+    s = base(); s.dealer = 'Z'; encodeRejects(s);
+    s = base(); s.vulnerability = null; encodeRejects(s);
+    s = base(); s.vulnerability = { NS: 'yes', EW: false }; encodeRejects(s);
+    s = base(); s.deal.N = s.deal.N.slice(1); encodeRejects(s);
+    s = base(); s.deal = null; encodeRejects(s);
+  });
+
+  /* ---------- history integration (needs storage.js) ---------- */
+
+  test('a decoded deal enters a store as "unplayed", and is not added twice', function () {
+    assert(typeof B.createStore === 'function', 'storage.js is not loaded');
+    var store = B.createStore({ memory: true });
+    var d = B.decodeShare(GOOD);
+    d.source = 'shared';
+    var r = store.saveDeal(d);
+    same(r.added, true, 'first save should add the deal');
+    same(r.id, d.id, 'store id differs from the decoded id');
+    same(store.getStatus(r.id), 'unplayed');
+    same(store.loadDeal(r.id).contract, d.contract);
+    same(store.loadDeal(r.id).source, 'shared');
+    same(store.saveDeal(d).added, false, 'second save should not add');
+    same(store.listDeals().length, 1);
+  });
+
+  /* ---------- report ---------- */
+
+  var pass = 0, fail = 0;
+  var table = document.getElementById('results');
+  results.forEach(function (r) {
+    if (r.ok) pass++; else fail++;
+    var tr = document.createElement('tr');
+    var status = document.createElement('td');
+    status.className = r.ok ? 'ok' : 'bad';
+    status.textContent = r.ok ? 'PASS' : 'FAIL';
+    var what = document.createElement('td');
+    what.textContent = r.name;
+    if (!r.ok) {
+      var pre = document.createElement('pre');
+      pre.textContent = r.msg;
+      what.appendChild(pre);
+    }
+    tr.appendChild(status);
+    tr.appendChild(what);
+    table.appendChild(tr);
+  });
+  var summary = document.getElementById('summary');
+  summary.textContent = pass + ' passed, ' + fail + ' failed';
+  summary.className = fail ? 'fail' : 'pass';
+  document.title = (fail ? 'FAIL' : 'PASS') + ': share.js tests';
+})();
+</script>
+</body>
+</html>

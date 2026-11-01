@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Library tests (Session F)</title>
+<style>
+  body { font: 16px/1.4 system-ui, sans-serif; margin: 16px; max-width: 800px; }
+  h1 { font-size: 20px; }
+  #summary { font-weight: 600; margin: 8px 0 16px; }
+  .pass { color: #0a7d2c; }
+  .fail { color: #b00020; }
+  .skip { color: #8a6d00; }
+  li { margin: 4px 0; }
+  pre { white-space: pre-wrap; margin: 2px 0 0; font-size: 14px; }
+</style>
+</head>
+<body>
+<h1>Library tests (Session F)</h1>
+<div id="summary">Running&hellip;</div>
+<ul id="out"></ul>
+
+<script src="cards.js"></script>
+<script src="storage.js"></script>
+<script src="library.js"></script>
+<script src="library-data.js"></script>
+<script>
+(function () {
+  'use strict';
+  var B = window.Bridge;
+  var tests = [];
+
+  function test(name, fn) { tests.push({ name: name, fn: fn }); }
+  function skip(msg) { var e = new Error(msg); e.skip = true; throw e; }
+  function ok(cond, msg) { if (!cond) { throw new Error(msg || 'assertion failed'); } }
+  function eq(actual, expected, msg) {
+    if (actual !== expected) {
+      throw new Error((msg ? msg + ': ' : '') + 'expected ' + JSON.stringify(expected) + ', got ' + JSON.stringify(actual));
+    }
+  }
+
+  /* ---------- sample data ---------- */
+  var SAMPLE = window.BridgeLibraryData.files[0].pbn;          // 4 records, blank-line separated
+  var NOTES = ['nine top tricks plus the club ace', 'straightforward, ten or eleven tricks',
+               'hard: needs the diamond finesse', 'declarer is not South'];
+  var REC1 = SAMPLE.split('\n\n')[0] + '\n';
+
+  function seeds() { return B.buildSeedDeals(); }
+
+  function same(a, b) {   // a, b: StoredDeal-like; compares everything except id/source
+    eq(JSON.stringify(a.deal), JSON.stringify(b.deal), 'deal');
+    eq(a.dealer, b.dealer, 'dealer');
+    eq(a.vulnerability.NS, b.vulnerability.NS, 'vul NS');
+    eq(a.vulnerability.EW, b.vulnerability.EW, 'vul EW');
+    eq(a.auction.join(' '), b.auction.join(' '), 'auction');
+    eq(a.contract.level + a.contract.strain + a.contract.doubled + a.contract.declarer,
+       b.contract.level + b.contract.strain + b.contract.doubled + b.contract.declarer, 'contract');
+  }
+
+  function memStore() { return B.createStore({ memory: true }); }
+
+  /* ---------- splitter ---------- */
+  test('split: 4 blank-line separated deals', function () {
+    var r = B.splitPBN(SAMPLE);
+    eq(r.length, 4);
+    eq(r[0].number, 1); eq(r[3].number, 4);
+    ok(r[1].text.indexOf('[Auction "S"]') >= 0, 'record 2 keeps its auction');
+    ok(r[1].text.indexOf('[Deal "N:AK42') < 0, 'records are not mixed');
+  });
+  test('split: formatPBNRecord output concatenated with no blank lines', function () {
+    var text = seeds().map(function (d) { return B.formatPBNRecord(d); }).join('');
+    eq(B.splitPBN(text).length, 4);
+  });
+  test('split: bundled text equals formatPBNRecord of the seed deals', function () {
+    var formatted = seeds().map(function (d) { return B.formatPBNRecord(d); }).join('');
+    eq(SAMPLE.replace(/\n\n/g, '\n'), formatted);
+  });
+  test('split: CRLF, lone CR, BOM, % lines, extra blank lines', function () {
+    var text = '\uFEFF% PBN file\r\n\r\n\r\n' + SAMPLE.replace(/\n/g, '\r\n') + '\r\n\r\n\r\n';
+    eq(B.splitPBN(text).length, 4);
+    eq(B.splitPBN(SAMPLE.replace(/\n/g, '\r')).length, 4);
+  });
+  test('split: empty, whitespace, non-string, no tags', function () {
+    eq(B.splitPBN('').length, 0);
+    eq(B.splitPBN('  \n\n \t\n').length, 0);
+    eq(B.splitPBN(null).length, 0);
+    eq(B.splitPBN(42).length, 0);
+    eq(B.splitPBN('hello\nworld\n').length, 0);
+  });
+  test('split: other tags (Event, Board) do not start a new deal', function () {
+    var text = '[Event "Club"]\n[Board "1"]\n' + REC1 + '\n[Event "Club"]\n[Board "2"]\n' + SAMPLE.split('\n\n')[2] + '\n';
+    eq(B.splitPBN(text).length, 2);
+  });
+
+  /* ---------- importer ---------- */
+  test('import: sample file gives 4 ok deals', function () {
+    var r = B.importPBN(SAMPLE);
+    eq(r.problem, ''); eq(r.total, 4); eq(r.okCount, 4); eq(r.errorCount, 0); eq(r.duplicateCount, 0);
+    r.results.forEach(function (x, i) { eq(x.status, 'ok'); eq(x.number, i + 1); ok(x.id && x.stored, 'has id and stored'); });
+  });
+  test('import: sample ids and contents match the existing seed deals', function () {
+    var r = B.importPBN(SAMPLE);
+    var s = seeds();
+    eq(s.length, 4);
+    r.results.forEach(function (x, i) {
+      eq(x.id, s[i].id, 'id of deal ' + (i + 1));
+      eq(x.stored.id, s[i].id);
+      same(x.stored, s[i]);
+    });
+  });
+  test('import: empty / whitespace / non-string / not PBN -> problem, no results, no throw', function () {
+    ['', '   \n\n', null, undefined, 42, {}, 'just some words\nnothing else'].forEach(function (input) {
+      var r = B.importPBN(input);
+      ok(r.problem.length > 0, 'problem set for ' + JSON.stringify(input));
+      eq(r.total, 0); eq(r.results.length, 0);
+    });
+  });
+  test('import: a bad deal in the middle does not stop the rest', function () {
+    var parts = SAMPLE.split('\n\n');
+    var bad = '[Dealer "N"]\n[Deal "N:AK42.A53.K63 976.T86.T872.QT9"]\n[Contract "3NT"]\n[Declarer "S"]\n';
+    var r = B.importPBN([parts[0], bad, parts[2]].join('\n\n'));
+    eq(r.total, 3); eq(r.okCount, 2); eq(r.errorCount, 1);
+    eq(r.results[0].status, 'ok'); eq(r.results[1].status, 'error'); eq(r.results[2].status, 'ok');
+    eq(r.results[1].number, 2);
+    ok(r.results[1].error.length > 0, 'reason given');
+  });
+  test('import: missing Deal, missing Contract, bad contract, bad declarer, auction mismatch', function () {
+    var deal = '[Deal "N:AK42.A53.K63.874 976.T86.T872.QT9 Q53.KQ4.AQ4.A652 JT8.J972.J95.KJ3"]';
+    var cases = [
+      '[Dealer "N"]\n[Contract "3NT"]\n[Declarer "S"]\n',
+      '[Dealer "N"]\n' + deal + '\n[Declarer "S"]\n',
+      '[Dealer "N"]\n' + deal + '\n[Contract "9XX"]\n[Declarer "S"]\n',
+      '[Dealer "N"]\n' + deal + '\n[Contract "3NT"]\n[Declarer "Q"]\n',
+      '[Dealer "N"]\n' + deal + '\n[Auction "N"]\n1H Pass Pass Pass\n[Contract "3NT"]\n[Declarer "S"]\n'
+    ];
+    var r = B.importPBN(cases.join('\n'));
+    eq(r.total, 5); eq(r.errorCount, 5); eq(r.okCount, 0);
+    r.results.forEach(function (x) { ok(x.error.length > 0, 'reason for deal ' + x.number); });
+  });
+  test('import: passed-out deal is skipped and reported by number', function () {
+    var parts = SAMPLE.split('\n\n');
+    var passed = '[Dealer "N"]\n[Deal "N:AK42.A53.K63.874 976.T86.T872.QT9 Q53.KQ4.AQ4.A652 JT8.J972.J95.KJ3"]\n' +
+                 '[Auction "N"]\nPass Pass Pass Pass\n[Contract "Pass"]\n[Declarer "S"]\n';
+    var r = B.importPBN(parts[0] + '\n' + passed + '\n' + parts[1]);
+    eq(r.total, 3); eq(r.okCount, 2); eq(r.errorCount, 1);
+    eq(r.results[1].number, 2); eq(r.results[1].status, 'error');
+    ok(r.results[1].error.length > 0, 'reason given');
+    eq(r.results[2].status, 'ok', 'the deal after it still imports');
+  });
+  test('import: duplicate deals in one file are flagged, not repeated', function () {
+    var r = B.importPBN(REC1 + '\n' + REC1 + '\n' + SAMPLE.split('\n\n')[1]);
+    eq(r.total, 3); eq(r.okCount, 2); eq(r.duplicateCount, 1);
+    eq(r.results[1].status, 'duplicate');
+    ok(/1/.test(r.results[1].error), 'names the earlier deal number');
+    eq(r.results[1].stored, null);
+  });
+  test('import: same cards dealt from East first, other vulnerability -> duplicate', function () {
+    var east = '[Dealer "N"]\n[Vulnerable "All"]\n[Deal "E:976.T86.T872.QT9 Q53.KQ4.AQ4.A652 JT8.J972.J95.KJ3 AK42.A53.K63.874"]\n[Contract "3NT"]\n[Declarer "S"]\n';
+    var r = B.importPBN(REC1 + '\n' + east);
+    eq(r.okCount, 1); eq(r.duplicateCount, 1);
+  });
+  test('import: same cards, different contract is a different deal', function () {
+    var other = REC1.replace('"3NT"', '"4S"').replace('[Declarer "S"]', '[Declarer "N"]');
+    var r = B.importPBN(REC1 + '\n' + other);
+    eq(r.okCount, 2);
+  });
+  test('import: two [Deal] tags in one record are reported, not crashed', function () {
+    var r = B.importPBN(REC1.replace('[Contract "3NT"]', '[Deal "N:AK42.A53.K63.874 976.T86.T872.QT9 Q53.KQ4.AQ4.A652 JT8.J972.J95.KJ3"]\n[Contract "3NT"]'));
+    ok(r.total >= 1);                   // the splitter starts a new record at the repeated Deal
+    ok(r.errorCount >= 1);
+  });
+  test('import: 300 deals are fast and counted', function () {
+    var one = B.formatPBNRecord(seeds()[0]);
+    var text = '', i;
+    for (i = 0; i < 300; i++) { text += one + '\n'; }
+    var r = B.importPBN(text);
+    eq(r.total, 300); eq(r.okCount, 1); eq(r.duplicateCount, 299);
+  });
+  test('import: file over the size limit is refused', function () {
+    var r = B.importPBN(new Array(1000002).join('x'));
+    ok(r.problem.length > 0); eq(r.total, 0);
+  });
+
+  /* ---------- manifest ---------- */
+  var VALID = JSON.stringify({
+    format: 'bridge-practice-library', version: 1, title: 'T',
+    files: [{ path: 'a.pbn', title: 'A', hands: [{ title: 'One', note: 'n1' }, { note: 'n2' }] },
+            { path: 'sub/b.pbn' }]
+  });
+  test('manifest: valid', function () {
+    var m = B.parseLibraryManifest(VALID);
+    ok(m.ok, m.error); eq(m.warnings.length, 0);
+    eq(m.manifest.title, 'T'); eq(m.manifest.files.length, 2);
+    eq(m.manifest.files[0].path, 'a.pbn'); eq(m.manifest.files[0].hands[0].title, 'One');
+    eq(m.manifest.files[0].hands[1].note, 'n2'); eq(m.manifest.files[0].hands[1].title, '');
+    eq(m.manifest.files[1].title, 'b.pbn', 'title defaults to file name');
+  });
+  test('manifest: the hosted sample library.json (http only)', function () {
+    if (location.protocol.indexOf('http') !== 0) { skip('open this page through a web server to run it'); }
+    return fetch('library/library.json', { cache: 'no-cache' }).then(function (r) {
+      ok(r.ok, 'library/library.json: HTTP ' + r.status);
+      return r.text();
+    }).then(function (text) {
+      var m = B.parseLibraryManifest(text);
+      ok(m.ok, m.error); eq(m.warnings.length, 0);
+      eq(m.manifest.files.length, 1); eq(m.manifest.files[0].hands.length, 4);
+      m.manifest.files[0].hands.forEach(function (h, i) { eq(h.note, NOTES[i], 'note ' + (i + 1)); });
+    });
+  });
+  test('manifest: minimal, and the parsed object form', function () {
+    ok(B.parseLibraryManifest('{"format":"bridge-practice-library","version":1,"files":[{"path":"x.pbn"}]}').ok);
+    ok(B.parseLibraryManifest(JSON.parse(VALID)).ok);
+    ok(B.parseLibraryManifest('\uFEFF' + VALID).ok, 'BOM tolerated');
+  });
+  test('manifest: the bundled data is a valid menu with the four notes', function () {
+    var m = B.parseLibraryManifest(window.BridgeLibraryData);
+    ok(m.ok, m.error); eq(m.warnings.length, 0);
+    m.manifest.files[0].hands.forEach(function (h, i) { eq(h.note, NOTES[i]); });
+  });
+  test('manifest: malformed JSON', function () {
+    ['{', '{"format":', 'not json', '[1,2', '{"a":1,}'].forEach(function (t) {
+      var m = B.parseLibraryManifest(t);
+      eq(m.ok, false, t); ok(/JSON/.test(m.error), 'says JSON: ' + m.error);
+    });
+  });
+  test('manifest: empty', function () {
+    ['', '   \n', null, undefined].forEach(function (t) {
+      var m = B.parseLibraryManifest(t);
+      eq(m.ok, false); ok(m.error.length > 0);
+    });
+    eq(B.parseLibraryManifest('{"format":"bridge-practice-library","version":1,"files":[]}').ok, false);
+    eq(B.parseLibraryManifest('{}').ok, false);
+  });
+  test('manifest: wrong shape, format, version, files', function () {
+    ['[]', '42', '"x"', 'null', '{"format":"other","version":1,"files":[{"path":"a"}]}',
+     '{"format":"bridge-practice-library","version":2,"files":[{"path":"a"}]}',
+     '{"format":"bridge-practice-library","version":"1","files":[{"path":"a"}]}',
+     '{"format":"bridge-practice-library","version":1}',
+     '{"format":"bridge-practice-library","version":1,"files":"a.pbn"}'].forEach(function (t) {
+      var m = B.parseLibraryManifest(t);
+      eq(m.ok, false, t); ok(m.error.length > 0);
+    });
+    ok(/newer/.test(B.parseLibraryManifest('{"format":"bridge-practice-library","version":2,"files":[{"path":"a"}]}').error));
+  });
+  test('manifest: unsafe or foreign paths are skipped with a warning', function () {
+    var bad = ['../x.pbn', 'a/../b.pbn', '/abs.pbn', 'http://evil.example/x.pbn', '//evil.example/x.pbn',
+               'a b.pbn', 'c:\\x.pbn', 'a\\b.pbn', 'x.pbn?y=1', '', './x.pbn', 'a//b.pbn'];
+    bad.forEach(function (p) {
+      var m = B.parseLibraryManifest(JSON.stringify({ format: 'bridge-practice-library', version: 1,
+        files: [{ path: p }, { path: 'good.pbn' }] }));
+      ok(m.ok, 'good entry still usable for ' + p);
+      eq(m.manifest.files.length, 1, 'bad path skipped: ' + JSON.stringify(p));
+      eq(m.warnings.length, 1);
+    });
+    var allBad = B.parseLibraryManifest(JSON.stringify({ format: 'bridge-practice-library', version: 1, files: [{ path: '../x' }] }));
+    eq(allBad.ok, false);
+  });
+  test('manifest: entry rules (both/neither path+pbn, duplicates, non-objects, too many)', function () {
+    var f = [{ path: 'a.pbn', pbn: '[Deal "x"]' }, {}, 7, null, { pbn: '   ' }, { path: 'dup.pbn' }, { path: 'dup.pbn' }, { pbn: '[Deal "x"]' }];
+    var m = B.parseLibraryManifest(JSON.stringify({ format: 'bridge-practice-library', version: 1, files: f }));
+    ok(m.ok); eq(m.manifest.files.length, 2); eq(m.warnings.length, 6);
+    var many = [], i;
+    for (i = 0; i < 60; i++) { many.push({ path: 'f' + i + '.pbn' }); }
+    var m2 = B.parseLibraryManifest(JSON.stringify({ format: 'bridge-practice-library', version: 1, files: many }));
+    ok(m2.ok); eq(m2.manifest.files.length, 50); eq(m2.warnings.length, 1);
+  });
+  test('manifest: titles and notes are cleaned and capped', function () {
+    var long = new Array(300).join('x');
+    var m = B.parseLibraryManifest(JSON.stringify({ format: 'bridge-practice-library', version: 1,
+      files: [{ path: 'a.pbn', hands: [{ title: '  a\n  b  ', note: long }, 'junk', { title: 5 }] }] }));
+    var h = m.manifest.files[0].hands;
+    eq(h[0].title, 'a b'); eq(h[0].note.length, 200); eq(h[1].title, ''); eq(h[2].title, '');
+  });
+
+  /* ---------- bundled library ---------- */
+  test('bundled: 4 hands, notes attached, ids match the seed deals', function () {
+    var lib = B.loadBundledLibrary();
+    eq(lib.error, ''); eq(lib.groups.length, 1);
+    var g = lib.groups[0], s = seeds();
+    eq(g.error, ''); eq(g.hands.length, 4); eq(g.skipped.length, 0);
+    g.hands.forEach(function (h, i) { eq(h.id, s[i].id); eq(h.note, NOTES[i]); eq(h.number, i + 1); });
+  });
+  test('bundled: missing data gives an error message, not a throw', function () {
+    var keep = window.BridgeLibraryData;
+    try {
+      window.BridgeLibraryData = undefined;
+      ok(B.loadBundledLibrary().error.length > 0);
+      window.BridgeLibraryData = { format: 'nope' };
+      ok(B.loadBundledLibrary().error.length > 0);
+      window.BridgeLibraryData = { format: 'bridge-practice-library', version: 1, files: [{ path: 'a.pbn' }] };
+      ok(B.loadBundledLibrary().groups[0].error.length > 0, 'path entry in bundled data is a group error');
+    } finally { window.BridgeLibraryData = keep; }
+  });
+
+  /* ---------- saving to the device ---------- */
+  test('add: saves with source library; second time nothing is duplicated', function () {
+    var store = memStore(), lib = B.loadBundledLibrary(), hands = lib.groups[0].hands;
+    var r = B.addLibraryHands(store, hands);
+    eq(r.added, 4); eq(r.already, 0); eq(r.blocked, ''); eq(r.stopped, '');
+    eq(store.listDeals().length, 4);
+    store.listDeals().forEach(function (d) { eq(d.source, 'library'); });
+    var r2 = B.addLibraryHands(store, hands);
+    eq(r2.added, 0); eq(r2.already, 4); eq(store.listDeals().length, 4);
+  });
+  test('add: deals already seeded by the app are left alone', function () {
+    var store = memStore();
+    store.seedIfEmpty(seeds());
+    var lib = B.markLibraryOnDevice(store, B.loadBundledLibrary());
+    lib.groups[0].hands.forEach(function (h) { eq(h.onDevice, true); });
+    var r = B.addLibraryHands(store, lib.groups[0].hands);
+    eq(r.added, 0); eq(r.already, 4); eq(store.listDeals().length, 4);
+  });
+  test('add: onDevice flags follow the store', function () {
+    var store = memStore(), lib = B.loadBundledLibrary();
+    B.markLibraryOnDevice(store, lib);
+    lib.groups[0].hands.forEach(function (h) { eq(h.onDevice, false); });
+    B.addLibraryHands(store, [lib.groups[0].hands[1]]);
+    B.markLibraryOnDevice(store, lib);
+    eq(lib.groups[0].hands.map(function (h) { return h.onDevice ? 1 : 0; }).join(''), '0100');
+  });
+  test('add: does not alter or stamp the library hand objects', function () {
+    var store = memStore(), lib = B.loadBundledLibrary(), h = lib.groups[0].hands[0];
+    B.addLibraryHands(store, [h]);
+    eq(h.stored.source, undefined);
+  });
+  test('add: no storage at all -> blocked, nothing saved, no throw', function () {
+    var store = B.createStore({ backend: null }), lib = B.loadBundledLibrary();
+    ok(!store.canSave());
+    var r = B.addLibraryHands(store, lib.groups[0].hands);
+    ok(r.blocked.length > 0); eq(r.added, 0); eq(r.notSaved, 4);
+    eq(store.listDeals().length, 0);
+  });
+  test('add: write failure (storage full) stops and reports', function () {
+    var store = B.createStore({ backend: { getItem: function () { return null; }, setItem: function () { throw new Error('QuotaExceededError'); } } });
+    var lib = B.loadBundledLibrary();
+    var r = B.addLibraryHands(store, lib.groups[0].hands);
+    ok(r.blocked.length > 0 || r.stopped.length > 0, 'a failure is reported');
+    ok(r.added < 4, 'not all counted as added');
+  });
+  test('add: bad input does not throw', function () {
+    ok(B.addLibraryHands(null, []).blocked.length > 0);
+    var r = B.addLibraryHands(memStore(), [{ number: 1, stored: { deal: {} } }]);
+    eq(r.added, 0); eq(r.failed.length, 1);
+  });
+
+  /* ---------- remote loading (stubbed fetch) ---------- */
+  function resp(body, type, status) {
+    return Promise.resolve({ ok: (status || 200) < 400, status: status || 200,
+      headers: { get: function () { return type === undefined ? 'application/json' : type; } },
+      text: function () { return Promise.resolve(body); } });
+  }
+  var MENU = JSON.stringify({ format: 'bridge-practice-library', version: 1, title: 'Remote',
+    files: [{ path: 'one.pbn', hands: [{ title: 'R1', note: 'first' }] }, { path: 'two.pbn' }] });
+  function routes(map) {
+    return function (url) {
+      var r = map[url];
+      if (r === undefined) { return resp('', 'text/plain', 404); }
+      return typeof r === 'function' ? r() : r;
+    };
+  }
+
+  test('remote: file:// is skipped with a clear message', function () {
+    return B.loadRemoteLibrary({ protocol: 'file:', fetch: function () { throw new Error('must not fetch'); } }).then(function (lib) {
+      eq(lib.unavailable, true); ok(/file/i.test(lib.error)); eq(lib.groups.length, 0);
+    });
+  });
+  test('remote: success loads the menu and each file, with a base path', function () {
+    var asked = [];
+    var f = function (url) {
+      asked.push(url);
+      return routes({ 'lib/library.json': resp(MENU), 'lib/one.pbn': resp(REC1, 'text/plain'),
+                      'lib/two.pbn': resp(SAMPLE, 'application/octet-stream') })(url);
+    };
+    return B.loadRemoteLibrary({ protocol: 'https:', manifestUrl: 'lib/library.json', fetch: f }).then(function (lib) {
+      eq(lib.error, ''); eq(lib.title, 'Remote'); eq(lib.groups.length, 2);
+      eq(lib.groups[0].hands.length, 1); eq(lib.groups[0].hands[0].title, 'R1'); eq(lib.groups[0].hands[0].note, 'first');
+      eq(lib.groups[1].hands.length, 4);
+      eq(asked.join(','), 'lib/library.json,lib/one.pbn,lib/two.pbn');
+    });
+  });
+  test('remote: no manifest on the server (404)', function () {
+    return B.loadRemoteLibrary({ protocol: 'http:', fetch: routes({}) }).then(function (lib) {
+      ok(/no online library/i.test(lib.error), lib.error); eq(lib.groups.length, 0);
+    });
+  });
+  test('remote: server error, network failure', function () {
+    return B.loadRemoteLibrary({ protocol: 'http:', fetch: function () { return resp('', 'text/plain', 500); } }).then(function (lib) {
+      ok(/500/.test(lib.error), lib.error);
+      return B.loadRemoteLibrary({ protocol: 'http:', fetch: function () { return Promise.reject(new TypeError('Failed to fetch')); } });
+    }).then(function (lib) {
+      ok(/reach the server/i.test(lib.error), lib.error);
+      return B.loadRemoteLibrary({ protocol: 'http:', fetch: function () { throw new Error('boom'); } });
+    }).then(function (lib) { ok(lib.error.length > 0); });
+  });
+  test('remote: HTML or media content type, bad JSON, empty menu', function () {
+    return B.loadRemoteLibrary({ protocol: 'http:', fetch: function () { return resp('<html></html>', 'text/html; charset=utf-8'); } }).then(function (lib) {
+      ok(/web page/i.test(lib.error), lib.error);
+      return B.loadRemoteLibrary({ protocol: 'http:', fetch: function () { return resp('x', 'image/png'); } });
+    }).then(function (lib) {
+      ok(/wrong kind/i.test(lib.error), lib.error);
+      return B.loadRemoteLibrary({ protocol: 'http:', fetch: function () { return resp('{oops', 'application/json'); } });
+    }).then(function (lib) {
+      ok(/JSON/.test(lib.error), lib.error);
+      return B.loadRemoteLibrary({ protocol: 'http:', fetch: function () { return resp('', 'application/json'); } });
+    }).then(function (lib) { ok(/empty/i.test(lib.error), lib.error); });
+  });
+  test('remote: slow server times out', function () {
+    var t0 = Date.now();
+    return B.loadRemoteLibrary({ protocol: 'http:', timeoutMs: 80, fetch: function () { return new Promise(function () {}); } }).then(function (lib) {
+      ok(/too long/i.test(lib.error), lib.error); ok(Date.now() - t0 < 2000, 'returned promptly');
+    });
+  });
+  test('remote: one missing or broken file does not hide the others', function () {
+    var f = routes({ 'library.json': resp(MENU), 'one.pbn': resp(REC1, 'text/plain') });   // two.pbn -> 404
+    return B.loadRemoteLibrary({ protocol: 'http:', manifestUrl: 'library.json', fetch: f }).then(function (lib) {
+      eq(lib.error, ''); eq(lib.groups[0].hands.length, 1);
+      ok(/not found/i.test(lib.groups[1].error), lib.groups[1].error);
+    });
+  });
+  test('remote: a file with bad deals reports them by number', function () {
+    var parts = SAMPLE.split('\n\n');
+    var body = parts[0] + '\n[Dealer "N"]\n[Contract "Pass"]\n[Declarer "S"]\n\n' + parts[1];
+    var f = routes({ 'library.json': resp(MENU), 'one.pbn': resp(body, 'text/plain'), 'two.pbn': resp('not pbn at all', 'text/plain') });
+    return B.loadRemoteLibrary({ protocol: 'http:', manifestUrl: 'library.json', fetch: f }).then(function (lib) {
+      eq(lib.groups[0].hands.length, 2); eq(lib.groups[0].skipped.length, 1); eq(lib.groups[0].skipped[0].number, 2);
+      ok(lib.groups[1].error.length > 0, 'non-PBN file is a group error');
+    });
+  });
+  test('remote: the hosted sample files match the bundled hands (http only)', function () {
+    if (location.protocol.indexOf('http') !== 0) { skip('open this page through a web server to run it'); }
+    return B.loadRemoteLibrary({}).then(function (lib) {
+      eq(lib.error, '', 'remote error'); eq(lib.groups.length, 1);
+      var s = seeds(), g = lib.groups[0];
+      eq(g.error, ''); eq(g.hands.length, 4); eq(g.skipped.length, 0);
+      g.hands.forEach(function (h, i) { eq(h.id, s[i].id); eq(h.note, NOTES[i]); });
+    });
+  });
+
+  /* ---------- runner ---------- */
+  var out = document.getElementById('out');
+  var counts = { pass: 0, fail: 0, skip: 0 };
+
+  function show(cls, name, detail) {
+    var li = document.createElement('li');
+    li.className = cls;
+    li.textContent = (cls === 'pass' ? 'PASS ' : cls === 'skip' ? 'SKIP ' : 'FAIL ') + name;
+    if (detail) { var pre = document.createElement('pre'); pre.textContent = detail; li.appendChild(pre); }
+    out.appendChild(li);
+    counts[cls]++;
+  }
+
+  function runNext(i) {
+    if (i >= tests.length) {
+      var el = document.getElementById('summary');
+      el.textContent = counts.pass + ' passed, ' + counts.fail + ' failed, ' + counts.skip + ' skipped';
+      el.className = counts.fail ? 'fail' : 'pass';
+      return;
+    }
+    var t = tests[i];
+    function done(err) {
+      if (!err) { show('pass', t.name); }
+      else if (err.skip) { show('skip', t.name, err.message); }
+      else { show('fail', t.name, err && err.message ? err.message : String(err)); }
+      runNext(i + 1);
+    }
+    try {
+      var r = t.fn();
+      if (r && typeof r.then === 'function') { r.then(function () { done(null); }, done); }
+      else { done(null); }
+    } catch (e) { done(e); }
+  }
+
+  runNext(0);
+})();
+</script>
+</body>
+</html>

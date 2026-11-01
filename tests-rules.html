@@ -1,0 +1,628 @@
+<!-- tests-rules.html: browser tests for rules.js; open this page in a browser and it runs them all. -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rules.js tests</title>
+<style>
+  body { font-family: -apple-system, Helvetica, Arial, sans-serif; margin: 16px; line-height: 1.4; }
+  #summary { font-size: 1.2em; font-weight: bold; padding: 8px 12px; border-radius: 6px; background: #eee; }
+  #summary.ok { background: #d8f5d8; color: #145214; }
+  #summary.bad { background: #fbd9d9; color: #7a1010; }
+  ul { list-style: none; padding: 0; }
+  li { padding: 4px 0; border-bottom: 1px solid #ddd; }
+  .tag { display: inline-block; min-width: 3.2em; font-weight: bold; }
+  li.pass .tag { color: #1a7a1a; }
+  li.fail .tag { color: #b00020; }
+  .detail { display: block; margin: 2px 0 0 3.2em; color: #b00020; font-family: monospace; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>rules.js tests</h1>
+<div id="summary">Running tests…</div>
+<ul id="results"></ul>
+
+<script src="cards.js"></script>
+<script src="rules.js"></script>
+<script>
+(function () {
+  var B = window.Bridge || {};
+  var summary = document.getElementById('summary');
+  var list = document.getElementById('results');
+
+  if (!B.parsePBNDeal || !B.sortHand || !B.makeDeck || !B.dealRandom) {
+    summary.textContent = 'FAIL: cards.js did not load (window.Bridge is missing its helpers)';
+    summary.className = 'bad';
+    return;
+  }
+
+  var tests = [];
+  function test(name, fn) { tests.push({ name: name, fn: fn }); }
+
+  // ------------------------------------------------------------ assertion helpers
+
+  function assert(cond, msg) {
+    if (!cond) throw new Error(msg || 'assertion failed');
+  }
+
+  function eq(actual, expected, msg) {
+    var a = JSON.stringify(actual);
+    var e = JSON.stringify(expected);
+    if (a !== e) throw new Error((msg ? msg + ': ' : '') + 'expected ' + e + ' but got ' + a);
+  }
+
+  // Same cards, ignoring order.
+  function sameCards(actual, expected, msg) {
+    eq(B.sortHand(actual), B.sortHand(expected), msg);
+  }
+
+  // Checks that fn throws an Error with a non-empty message (matching pattern, if given); returns the error.
+  function throwsError(fn, pattern, label) {
+    var err = null;
+    try { fn(); } catch (e) { err = e; }
+    if (!err) throw new Error((label || 'the call') + ' should have thrown but did not');
+    if (!(err instanceof Error)) throw new Error((label || 'the call') + ' threw something that is not an Error: ' + err);
+    if (!err.message) throw new Error((label || 'the call') + ' threw an Error with no message');
+    if (pattern && !pattern.test(err.message)) {
+      throw new Error((label || 'the call') + ' threw ' + JSON.stringify(err.message) + ', which does not match ' + pattern);
+    }
+    return err;
+  }
+
+  function deepFreeze(o) {
+    if (o && typeof o === 'object' && !Object.isFrozen(o)) {
+      Object.freeze(o);
+      Object.keys(o).forEach(function (k) { deepFreeze(o[k]); });
+    }
+    return o;
+  }
+
+  // ------------------------------------------------------------ fixtures
+
+  function contract(level, strain, declarer) {
+    return { level: level, strain: strain, doubled: 0, declarer: declarer };
+  }
+
+  function rotSeat(seat, r) { return B.SEATS[(B.SEATS.indexOf(seat) + r) % 4]; }
+  function nextSeat(seat) { return rotSeat(seat, 1); }
+  function sideOf(seat) { return B.SEATS.indexOf(seat) % 2 === 0 ? 'NS' : 'EW'; }
+
+  function rotateDeal(deal, r) {
+    var out = {};
+    B.SEATS.forEach(function (s) { out[rotSeat(s, r)] = deal[s].slice(); });
+    return out;
+  }
+
+  function playAll(state, cards) {
+    cards.forEach(function (c) { state = B.playCard(state, c); });
+    return state;
+  }
+
+  // Trick from text such as 'N:SA E:H2 S:SK W:SQ' (play order).
+  function T(spec) {
+    return spec.split(' ').map(function (part) {
+      return { seat: part.charAt(0), card: part.slice(2) };
+    });
+  }
+
+  // Deal A: every hand is 4-3-3-3, used for the hand-worked game below.
+  var DEAL_A = B.parsePBNDeal('N:AK62.AJ3.KQ3.A83 Q83.Q862.854.Q75 J74.KT4.A962.K94 T95.975.JT7.JT62');
+
+  // Deal V: each player holds one whole suit (N hearts, E spades, S diamonds, W clubs), so everyone is void in three suits.
+  var DEAL_V = B.parsePBNDeal('N:-.AKQJT98765432.-.- AKQJT98765432.-.-.- -.-.AKQJT98765432.- -.-.-.AKQJT98765432');
+
+  /*
+   * HAND-WORKED GAME on Deal A. Declarer S, notrump, so W makes the opening lead.
+   *
+   *        spades  hearts  diamonds  clubs
+   *   N    AK62    AJ3     KQ3       A83
+   *   E    Q83     Q862    854       Q75
+   *   S    J74     KT4     A962      K94
+   *   W    T95     975     JT7       JT62
+   *
+   * Every hand is 4-3-3-3. Play goes one suit at a time with all four following suit, three rounds per
+   * suit, which is 12 tricks. Each hand then holds exactly one spare card (N S2, E HQ, S D9, W CT),
+   * and those make trick 13. Plays are listed in order from the leader, clockwise. In notrump the
+   * highest card of the suit led wins, and the winner leads the next trick.
+   *
+   *   #  lead  plays (in order)     winner  why
+   *   1  W     ST SA S3 S4          N       SA is the highest spade
+   *   2  N     SK S8 S7 S9          N       SK is the highest spade
+   *   3  N     S6 SQ SJ S5          E       SQ is the highest spade
+   *   4  E     H2 HK H5 H3          S       HK is the highest heart
+   *   5  S     H4 H7 HA H6          N       HA is the highest heart
+   *   6  N     HJ H8 HT H9          N       HJ beats HT, H9, H8
+   *   7  N     DK D4 D2 D7          N       DK is the highest diamond
+   *   8  N     DQ D5 D6 DT          N       DQ beats DT
+   *   9  N     D3 D8 DA DJ          S       DA is the highest diamond
+   *  10  S     C4 C2 CA C5          N       CA is the highest club
+   *  11  N     C3 C7 CK C6          S       CK is the highest club
+   *  12  S     C9 CJ C8 CQ          E       CQ beats CJ
+   *  13  E     HQ D9 CT S2          E       only E's lead is a heart; the rest are discards
+   *
+   * Each winner leads the next trick, which is what the "lead" column shows (trick 1 is W, left of S).
+   * NS win tricks 1, 2, 4, 5, 6, 7, 8, 9, 10, 11 = 10 tricks.
+   * EW win tricks 3, 12, 13 = 3 tricks.   10 + 3 = 13.
+   *
+   * Declarer S (side NS) therefore takes 10 tricks:
+   *   3NT needs 9:  made, with one overtrick.
+   *   4NT needs 10: made, with exactly the tricks needed.
+   *   5NT needs 11: not made, one trick short.
+   *   7NT needs 13: not made, three tricks short.
+   *
+   * Turning every seat one place clockwise (N->E, E->S, S->W, W->N) and moving the hands and the plays
+   * with them gives the same game with declarer W (side EW), then N, then E. Declarer's side takes 10
+   * tricks every time, so the same results hold for all four declarer seats.
+   */
+  var SCRIPT = [
+    ['W', 'ST SA S3 S4', 'N'],
+    ['N', 'SK S8 S7 S9', 'N'],
+    ['N', 'S6 SQ SJ S5', 'E'],
+    ['E', 'H2 HK H5 H3', 'S'],
+    ['S', 'H4 H7 HA H6', 'N'],
+    ['N', 'HJ H8 HT H9', 'N'],
+    ['N', 'DK D4 D2 D7', 'N'],
+    ['N', 'DQ D5 D6 DT', 'N'],
+    ['N', 'D3 D8 DA DJ', 'S'],
+    ['S', 'C4 C2 CA C5', 'N'],
+    ['N', 'C3 C7 CK C6', 'S'],
+    ['S', 'C9 CJ C8 CQ', 'E'],
+    ['E', 'HQ D9 CT S2', 'E']
+  ];
+
+  // Plays the first `upTo` tricks of SCRIPT (all 13 by default), turned `rot` places clockwise,
+  // checking whose turn it is and who wins each trick along the way.
+  function playScript(rot, level, strain, upTo) {
+    var declarer = rotSeat('S', rot);
+    var declSide = sideOf(declarer);
+    var state = B.newGame(rotateDeal(DEAL_A, rot), contract(level, strain, declarer));
+    var n = upTo === undefined ? SCRIPT.length : upTo;
+    var declTricks = 0;
+    for (var t = 0; t < n; t++) {
+      var seat = rotSeat(SCRIPT[t][0], rot);
+      var cards = SCRIPT[t][1].split(' ');
+      var winner = rotSeat(SCRIPT[t][2], rot);
+      var where = 'rotation ' + rot + ', trick ' + (t + 1);
+      for (var k = 0; k < 4; k++) {
+        eq(state.toPlay, seat, where + ', card ' + (k + 1) + ': seat to play');
+        state = B.playCard(state, cards[k]);
+        seat = nextSeat(seat);
+      }
+      eq(state.toPlay, winner, where + ': winner leads next');
+      eq(state.completedTricks.length, t + 1, where + ': completed tricks');
+      eq(state.currentTrick, [], where + ': current trick is empty');
+      if (sideOf(winner) === declSide) declTricks++;
+      eq(state.tricksWon[declSide], declTricks, where + ': declarer side tricks');
+      eq(state.tricksWon[declSide === 'NS' ? 'EW' : 'NS'], t + 1 - declTricks, where + ': defenders tricks');
+    }
+    return state;
+  }
+
+  // ------------------------------------------------------------ dummySeat, newGame, opening lead
+
+  test('dummySeat is declarer\'s partner for each seat', function () {
+    eq(B.dummySeat(contract(3, 'NT', 'N')), 'S');
+    eq(B.dummySeat(contract(3, 'NT', 'E')), 'W');
+    eq(B.dummySeat(contract(3, 'NT', 'S')), 'N');
+    eq(B.dummySeat(contract(3, 'NT', 'W')), 'E');
+  });
+
+  test('newGame builds the starting state from the spec', function () {
+    var c = contract(4, 'H', 'S');
+    var state = B.newGame(DEAL_A, c);
+    eq(state.toPlay, 'W');
+    eq(state.tricksWon, { NS: 0, EW: 0 });
+    eq(state.currentTrick, []);
+    eq(state.completedTricks, []);
+    eq(state.contract, c);
+    B.SEATS.forEach(function (s) {
+      eq(state.handsRemaining[s].length, 13, s + ' hand size');
+      sameCards(state.handsRemaining[s], DEAL_A[s], s + ' handsRemaining');
+      sameCards(state.deal[s], DEAL_A[s], s + ' deal');
+    });
+  });
+
+  test('opening lead is left of declarer, for each of the four declarer seats', function () {
+    var expected = { N: 'E', E: 'S', S: 'W', W: 'N' };
+    B.SEATS.forEach(function (declarer) {
+      var state = B.newGame(DEAL_A, contract(1, 'NT', declarer));
+      eq(state.toPlay, expected[declarer], 'declarer ' + declarer);
+      eq(state.tricksWon, { NS: 0, EW: 0 }, 'declarer ' + declarer + ' tricksWon');
+    });
+  });
+
+  test('newGame neither mutates nor shares the deal passed in', function () {
+    var deal = B.parsePBNDeal('N:AK62.AJ3.KQ3.A83 Q83.Q862.854.Q75 J74.KT4.A962.K94 T95.975.JT7.JT62');
+    var before = JSON.stringify(deal);
+    var state = B.newGame(deal, contract(1, 'NT', 'S'));
+    eq(JSON.stringify(deal), before, 'deal after newGame');
+    state.handsRemaining.W.pop();
+    state.deal.N.pop();
+    eq(JSON.stringify(deal), before, 'deal after editing the returned state');
+  });
+
+  test('newGame rejects a bad deal or contract with a clear message', function () {
+    var short = B.parsePBNDeal('N:AK62.AJ3.KQ3.A83 Q83.Q862.854.Q75 J74.KT4.A962.K94 T95.975.JT7.JT62');
+    short.W = short.W.slice(1);
+    throwsError(function () { B.newGame(short, contract(1, 'NT', 'S')); }, /13/, 'a 12-card hand');
+    var dup = B.parsePBNDeal('N:AK62.AJ3.KQ3.A83 Q83.Q862.854.Q75 J74.KT4.A962.K94 T95.975.JT7.JT62');
+    dup.W[0] = dup.N[0];
+    throwsError(function () { B.newGame(dup, contract(1, 'NT', 'S')); }, /more than once/, 'a duplicate card');
+    throwsError(function () { B.newGame(DEAL_A, contract(8, 'NT', 'S')); }, /level/, 'level 8');
+    throwsError(function () { B.newGame(DEAL_A, contract(1, 'X', 'S')); }, /strain/, 'strain X');
+    throwsError(function () { B.newGame(DEAL_A, contract(1, 'NT', 'Q')); }, /declarer/, 'declarer Q');
+  });
+
+  // ------------------------------------------------------------ legalPlays
+
+  test('leading: any card may be led, at the start and after a trick', function () {
+    var state = B.newGame(DEAL_A, contract(4, 'NT', 'S'));
+    sameCards(B.legalPlays(state), DEAL_A.W, 'opening lead by W');
+    var after = playScript(0, 4, 'NT', 1); // N won trick 1 and leads
+    eq(after.toPlay, 'N');
+    eq(after.handsRemaining.N.length, 12);
+    sameCards(B.legalPlays(after), after.handsRemaining.N, 'N leading trick 2');
+  });
+
+  test('following suit: must follow when able, even with a trump contract', function () {
+    ['NT', 'H'].forEach(function (strain) {
+      var state = B.newGame(DEAL_A, contract(4, strain, 'S'));
+      state = B.playCard(state, 'ST'); // W leads a spade
+      sameCards(B.legalPlays(state), ['SA', 'SK', 'S6', 'S2'], strain + ': N must follow in spades');
+      state = B.playCard(state, 'SA');
+      sameCards(B.legalPlays(state), ['SQ', 'S8', 'S3'], strain + ': E must follow in spades');
+    });
+  });
+
+  test('void: any card may be played when unable to follow suit', function () {
+    var state = B.newGame(DEAL_V, contract(1, 'NT', 'S'));
+    sameCards(B.legalPlays(state), DEAL_V.W, 'W leads');
+    state = B.playCard(state, 'C2');
+    sameCards(B.legalPlays(state), DEAL_V.N, 'N is void in clubs, so every card is legal');
+    state = B.playCard(state, 'H5');
+    sameCards(B.legalPlays(state), DEAL_V.E, 'E is void in clubs, so every card is legal');
+
+    // Deal A, trick 13: S holds only D9 and is void in the heart that E leads.
+    var late = playScript(0, 4, 'NT', 12);
+    late = B.playCard(late, 'HQ');
+    eq(late.toPlay, 'S');
+    eq(B.legalPlays(late), ['D9']);
+  });
+
+  test('legalPlays returns [] once the game is finished', function () {
+    eq(B.legalPlays(playScript(0, 4, 'NT')), []);
+  });
+
+  // ------------------------------------------------------------ trickWinner
+
+  test('a trump beats the led suit', function () {
+    eq(B.trickWinner(T('N:SA E:H2 S:SK W:SQ'), 'H'), 'E');
+  });
+
+  test('the highest trump wins when several are played', function () {
+    eq(B.trickWinner(T('N:SA E:H2 S:H9 W:H5'), 'H'), 'S');
+    eq(B.trickWinner(T('N:CA E:D3 S:D2 W:D5'), 'D'), 'W');
+    eq(B.trickWinner(T('N:H3 E:H9 S:C7 W:HK'), 'H'), 'W', 'trump suit led');
+  });
+
+  test('with a trump strain but no trump played, the highest card of the suit led wins', function () {
+    eq(B.trickWinner(T('N:D5 E:CA S:D9 W:DK'), 'S'), 'W', 'CA is a discard and cannot win');
+    eq(B.trickWinner(T('S:C2 W:C7 N:H2 E:D3'), 'S'), 'W', 'led suit is not trump');
+  });
+
+  test('notrump has no trump', function () {
+    eq(B.trickWinner(T('N:H2 E:SA S:H3 W:CA'), 'NT'), 'S', 'highest heart wins, SA and CA are discards');
+    eq(B.trickWinner(T('N:C2 E:C3 S:HA W:SA'), 'NT'), 'E');
+    eq(B.trickWinner(T('N:H2 E:SA S:H3 W:CA'), 'S'), 'E', 'the same trick with spades as trump');
+  });
+
+  test('trickWinner works on a partial trick, with object cards, and rejects bad input', function () {
+    eq(B.trickWinner(T('N:H2 E:H9'), 'NT'), 'E');
+    eq(B.trickWinner([{ seat: 'N', card: { suit: 'S', rank: 'A' } }, { seat: 'E', card: { suit: 'H', rank: '2' } }], 'H'), 'E');
+    throwsError(function () { B.trickWinner([], 'NT'); }, /1 to 4/, 'an empty trick');
+    throwsError(function () { B.trickWinner(T('N:H2'), 'Z'); }, /strain/, 'strain Z');
+  });
+
+  test('playCard: a ruff wins in a trump strain and not in notrump (Deal V)', function () {
+    // W leads C2; N, E and S are all void in clubs and discard H2, S2 and D2.
+    var expected = { C: 'W', D: 'S', H: 'N', S: 'E', NT: 'W' };
+    Object.keys(expected).forEach(function (strain) {
+      var state = playAll(B.newGame(DEAL_V, contract(1, strain, 'S')), ['C2', 'H2', 'S2', 'D2']);
+      eq(state.toPlay, expected[strain], 'winner with strain ' + strain);
+      eq(state.tricksWon[sideOf(expected[strain])], 1, 'tricksWon with strain ' + strain);
+      eq(state.tricksWon[sideOf(expected[strain]) === 'NS' ? 'EW' : 'NS'], 0);
+    });
+  });
+
+  // ------------------------------------------------------------ playCard
+
+  test('the winner of a trick leads the next, and the trick is recorded', function () {
+    var state = playAll(B.newGame(DEAL_A, contract(4, 'NT', 'S')), ['ST', 'SA', 'S3', 'S4']);
+    eq(state.toPlay, 'N', 'N won trick 1, although S played last (next clockwise would be W)');
+    eq(state.completedTricks, [[
+      { seat: 'W', card: 'ST' }, { seat: 'N', card: 'SA' }, { seat: 'E', card: 'S3' }, { seat: 'S', card: 'S4' }
+    ]]);
+    eq(state.currentTrick, []);
+    eq(state.tricksWon, { NS: 1, EW: 0 });
+    var next = B.playCard(state, 'SK');
+    eq(next.currentTrick, [{ seat: 'N', card: 'SK' }]);
+    eq(next.toPlay, 'E');
+  });
+
+  test('playCard builds a trick card by card and removes the card from the hand', function () {
+    var s0 = B.newGame(DEAL_A, contract(4, 'NT', 'S'));
+    var s1 = B.playCard(s0, 'ST');
+    eq(s1.currentTrick, [{ seat: 'W', card: 'ST' }]);
+    eq(s1.toPlay, 'N');
+    eq(s1.handsRemaining.W.length, 12);
+    assert(s1.handsRemaining.W.indexOf('ST') < 0, 'ST should have left W\'s hand');
+    eq(s1.completedTricks, []);
+    eq(s1.tricksWon, { NS: 0, EW: 0 });
+  });
+
+  test('playCard accepts a {suit, rank} object and records the string form', function () {
+    var state = B.playCard(B.newGame(DEAL_A, contract(4, 'NT', 'S')), { suit: 'S', rank: 'T' });
+    eq(state.currentTrick, [{ seat: 'W', card: 'ST' }]);
+  });
+
+  test('an illegal play throws a clear Error and leaves the state unchanged', function () {
+    var start = B.newGame(DEAL_A, contract(4, 'NT', 'S'));
+    var mid = B.playCard(start, 'ST'); // N to play, holding spades
+    var finished = playScript(0, 4, 'NT');
+    var cases = [
+      { state: mid, card: 'HA', pattern: /follow suit/, label: 'N plays a heart while holding spades' },
+      { state: mid, card: 'DK', pattern: /follow suit/, label: 'N plays a diamond while holding spades' },
+      { state: start, card: 'SA', pattern: /does not hold/, label: 'W plays N\'s card' },
+      { state: mid, card: 'ST', pattern: /does not hold/, label: 'a card that was already played' },
+      { state: start, card: 'XX', pattern: /./, label: 'a malformed card string' },
+      { state: start, card: { suit: 'S' }, pattern: /./, label: 'a malformed card object' },
+      { state: finished, card: 'SA', pattern: /finished/, label: 'a play after the 13th trick' }
+    ];
+    cases.forEach(function (c) {
+      var before = JSON.stringify(c.state);
+      throwsError(function () { B.playCard(c.state, c.card); }, c.pattern, c.label);
+      eq(JSON.stringify(c.state), before, c.label + ': state after the failed play');
+    });
+    // The original is still fully playable afterwards.
+    sameCards(B.legalPlays(mid), ['SA', 'SK', 'S6', 'S2']);
+    eq(B.playCard(mid, 'SA').currentTrick.length, 2);
+  });
+
+  test('playCard does not mutate its input and returns a new state', function () {
+    var state = B.newGame(DEAL_A, contract(4, 'NT', 'S'));
+    state = playAll(state, ['ST', 'SA', 'S3']); // a trick in progress
+    var snapshot = JSON.stringify(state);
+    deepFreeze(state); // any write to the old state would now throw (rules.js runs in strict mode)
+    var next = B.playCard(state, 'S4'); // completes the trick, so completedTricks and tricksWon change too
+    assert(next !== state, 'a new object should be returned');
+    eq(JSON.stringify(state), snapshot, 'the old state after the play');
+    eq(state.currentTrick.length, 3, 'old currentTrick');
+    eq(state.completedTricks.length, 0, 'old completedTricks');
+    eq(state.handsRemaining.S.length, 13, 'old S hand');
+    eq(next.completedTricks.length, 1);
+    // Editing the new state must not reach the old one either.
+    next.handsRemaining.N.length = 0;
+    next.completedTricks[0][0].card = 'XX';
+    eq(JSON.stringify(state), snapshot, 'the old state after editing the new one');
+  });
+
+  // ------------------------------------------------------------ isUserTurn
+
+  test('isUserTurn: true for declarer and dummy, false for a defender', function () {
+    var state = B.newGame(DEAL_A, contract(4, 'NT', 'S')); // declarer S, dummy N, defenders E and W
+    var seen = [];
+    ['ST', 'SA', 'S3', 'S4'].forEach(function (c) {
+      seen.push(state.toPlay + ':' + B.isUserTurn(state));
+      state = B.playCard(state, c);
+    });
+    eq(seen, ['W:false', 'N:true', 'E:false', 'S:true']);
+    eq(state.toPlay, 'N');
+    eq(B.isUserTurn(state), true, 'N won and leads');
+  });
+
+  test('isUserTurn follows the declarer for all four declarer seats', function () {
+    for (var rot = 0; rot < 4; rot++) {
+      var state = B.newGame(rotateDeal(DEAL_A, rot), contract(4, 'NT', rotSeat('S', rot)));
+      var cards = SCRIPT[0][1].split(' ');
+      var turns = [];
+      for (var k = 0; k < 4; k++) {
+        turns.push(B.isUserTurn(state));
+        state = B.playCard(state, cards[k]);
+      }
+      eq(turns, [false, true, false, true], 'declarer ' + rotSeat('S', rot));
+    }
+  });
+
+  // ------------------------------------------------------------ isFinished, getResult, full games
+
+  test('isFinished is false until the 13th trick is complete', function () {
+    eq(B.isFinished(B.newGame(DEAL_A, contract(4, 'NT', 'S'))), false, 'at the start');
+    eq(B.isFinished(playScript(0, 4, 'NT', 12)), false, 'after 12 tricks');
+    var almost = playAll(playScript(0, 4, 'NT', 12), ['HQ', 'D9', 'CT']);
+    eq(B.isFinished(almost), false, 'after 51 cards');
+    eq(B.isFinished(B.playCard(almost, 'S2')), true, 'after 52 cards');
+  });
+
+  test('getResult throws until the game is finished', function () {
+    throwsError(function () { B.getResult(B.newGame(DEAL_A, contract(4, 'NT', 'S'))); }, /not finished/, 'at the start');
+    throwsError(function () { B.getResult(playScript(0, 4, 'NT', 12)); }, /12 of 13/, 'after 12 tricks');
+  });
+
+  test('full 13-trick game worked by hand: declarer\'s side takes 10, defenders 3 (all four declarer seats)', function () {
+    for (var rot = 0; rot < 4; rot++) {
+      var declarer = rotSeat('S', rot);
+      var declSide = sideOf(declarer);
+      var defSide = declSide === 'NS' ? 'EW' : 'NS';
+      var state = playScript(rot, 4, 'NT');
+      var where = 'declarer ' + declarer;
+      eq(B.isFinished(state), true, where + ': finished');
+      eq(state.completedTricks.length, 13, where + ': 13 tricks');
+      eq(state.tricksWon[declSide], 10, where + ': declarer side');
+      eq(state.tricksWon[defSide], 3, where + ': defenders');
+      B.SEATS.forEach(function (s) { eq(state.handsRemaining[s], [], where + ': ' + s + ' hand empty'); });
+      for (var t = 0; t < 13; t++) {
+        eq(state.completedTricks[t].map(function (p) { return p.card; }), SCRIPT[t][1].split(' '), where + ': trick ' + (t + 1) + ' cards');
+        eq(B.trickWinner(state.completedTricks[t], 'NT'), rotSeat(SCRIPT[t][2], rot), where + ': trickWinner on trick ' + (t + 1));
+      }
+    }
+  });
+
+  test('getResult: 3NT made with an overtrick (9 needed, 10 taken)', function () {
+    for (var rot = 0; rot < 4; rot++) {
+      eq(B.getResult(playScript(rot, 3, 'NT')), { tricksTaken: 10, tricksNeeded: 9, made: true }, 'rotation ' + rot);
+    }
+  });
+
+  test('getResult: 4NT made with exactly the tricks needed (10 needed, 10 taken)', function () {
+    for (var rot = 0; rot < 4; rot++) {
+      eq(B.getResult(playScript(rot, 4, 'NT')), { tricksTaken: 10, tricksNeeded: 10, made: true }, 'rotation ' + rot);
+    }
+  });
+
+  test('getResult: 5NT not made, one trick short (11 needed, 10 taken)', function () {
+    for (var rot = 0; rot < 4; rot++) {
+      eq(B.getResult(playScript(rot, 5, 'NT')), { tricksTaken: 10, tricksNeeded: 11, made: false }, 'rotation ' + rot);
+    }
+  });
+
+  test('getResult: 7NT not made, three tricks short (13 needed, 10 taken)', function () {
+    for (var rot = 0; rot < 4; rot++) {
+      eq(B.getResult(playScript(rot, 7, 'NT')), { tricksTaken: 10, tricksNeeded: 13, made: false }, 'rotation ' + rot);
+    }
+  });
+
+  // ------------------------------------------------------------ property test
+
+  // Small seeded random function (mulberry32), so every run plays the same 200 games.
+  function mulberry32(seed) {
+    return function () {
+      seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+      var t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+  }
+
+  // Independent reference for the trick winner: scores each card as trump > led suit > discard, then by rank.
+  function referenceWinner(trick, strain) {
+    var led = trick[0].card.charAt(0);
+    var bestKey = -1;
+    var who = null;
+    trick.forEach(function (p) {
+      var suit = p.card.charAt(0);
+      var key = (suit === strain ? 2 : suit === led ? 1 : 0) * 100 + B.RANKS.indexOf(p.card.charAt(1));
+      if (key > bestKey) { bestKey = key; who = p.seat; }
+    });
+    return who;
+  }
+
+  test('property: 200 random games played to the end with random legal cards', function () {
+    var rng = mulberry32(20261030);
+    var strains = ['C', 'D', 'H', 'S', 'NT'];
+    var fullDeck = B.sortHand(B.makeDeck().map(function (c) { return typeof c === 'string' ? c : B.cardToString(c); }));
+
+    for (var g = 1; g <= 200; g++) {
+      var tag = 'game ' + g;
+      var deal = B.dealRandom(rng);
+      var level = 1 + Math.floor(rng() * 7);
+      var strain = strains[Math.floor(rng() * 5)];
+      var declarer = B.SEATS[Math.floor(rng() * 4)];
+      var state = B.newGame(deal, contract(level, strain, declarer));
+      var held = {};
+      B.SEATS.forEach(function (s) { held[s] = deal[s].slice(); });
+
+      var plays = 0;
+      while (!B.isFinished(state)) {
+        plays++;
+        assert(plays <= 52, tag + ': more than 52 plays without finishing');
+        var seat = state.toPlay;
+        var led = state.currentTrick.length ? state.currentTrick[0].card.charAt(0) : null;
+        var canFollow = led && held[seat].some(function (c) { return c.charAt(0) === led; });
+        var expectedLegal = canFollow ? held[seat].filter(function (c) { return c.charAt(0) === led; }) : held[seat];
+        var legal = B.legalPlays(state);
+        assert(legal.length > 0, tag + ': legalPlays was empty at play ' + plays);
+        sameCards(legal, expectedLegal, tag + ', play ' + plays + ': legalPlays for ' + seat);
+        var card = legal[Math.floor(rng() * legal.length)];
+        state = B.playCard(state, card);
+        held[seat].splice(held[seat].indexOf(card), 1);
+      }
+
+      // 13 tricks of 4, nothing left over
+      eq(state.completedTricks.length, 13, tag + ': number of tricks');
+      eq(state.currentTrick, [], tag + ': currentTrick');
+      B.SEATS.forEach(function (s) { eq(state.handsRemaining[s], [], tag + ': ' + s + ' hand empty'); });
+
+      // all 52 cards used exactly once, each seat played exactly its own 13
+      var used = [];
+      var bySeat = { N: [], E: [], S: [], W: [] };
+      state.completedTricks.forEach(function (trick) {
+        eq(trick.length, 4, tag + ': trick length');
+        trick.forEach(function (p) { used.push(p.card); bySeat[p.seat].push(p.card); });
+      });
+      eq(used.length, 52, tag + ': cards played');
+      eq(B.sortHand(used), fullDeck, tag + ': the 52 cards played are the 52 cards of the deck, each once');
+      B.SEATS.forEach(function (s) { sameCards(bySeat[s], deal[s], tag + ': cards played by ' + s); });
+
+      // trick order, leaders and winners, checked against the independent reference
+      var leader = rotSeat(declarer, 1);
+      var won = { NS: 0, EW: 0 };
+      state.completedTricks.forEach(function (trick, i) {
+        for (var k = 0; k < 4; k++) {
+          eq(trick[k].seat, rotSeat(leader, k), tag + ', trick ' + (i + 1) + ': seat of play ' + (k + 1));
+        }
+        var winner = referenceWinner(trick, strain);
+        eq(B.trickWinner(trick, strain), winner, tag + ', trick ' + (i + 1) + ': trickWinner');
+        won[sideOf(winner)]++;
+        leader = winner;
+      });
+      eq(state.tricksWon, won, tag + ': tricksWon');
+      eq(state.tricksWon.NS + state.tricksWon.EW, 13, tag + ': tricksWon sums to 13');
+
+      // result
+      var result = B.getResult(state);
+      eq(result.tricksTaken, won[sideOf(declarer)], tag + ': tricksTaken');
+      eq(result.tricksNeeded, 6 + level, tag + ': tricksNeeded');
+      eq(result.made, result.tricksTaken >= result.tricksNeeded, tag + ': made');
+    }
+  });
+
+  // ------------------------------------------------------------ run and report
+
+  var passed = 0;
+  var failed = 0;
+  tests.forEach(function (t) {
+    var li = document.createElement('li');
+    var tag = document.createElement('span');
+    tag.className = 'tag';
+    var label = document.createElement('span');
+    label.textContent = t.name;
+    try {
+      t.fn();
+      passed++;
+      li.className = 'pass';
+      tag.textContent = 'PASS';
+      li.appendChild(tag);
+      li.appendChild(label);
+    } catch (e) {
+      failed++;
+      li.className = 'fail';
+      tag.textContent = 'FAIL';
+      li.appendChild(tag);
+      li.appendChild(label);
+      var detail = document.createElement('span');
+      detail.className = 'detail';
+      detail.textContent = (e && e.message) ? e.message : String(e);
+      li.appendChild(detail);
+    }
+    list.appendChild(li);
+  });
+
+  summary.textContent = (failed === 0 ? 'PASS' : 'FAIL') + ': ' + passed + ' of ' + tests.length + ' tests passed' +
+    (failed ? ', ' + failed + ' failed' : '');
+  summary.className = failed === 0 ? 'ok' : 'bad';
+  document.title = (failed === 0 ? 'PASS' : 'FAIL') + ' ' + passed + '/' + tests.length + ' - rules.js tests';
+})();
+</script>
+</body>
+</html>

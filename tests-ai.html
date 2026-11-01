@@ -1,0 +1,173 @@
+<!-- tests-ai.html: browser tests showing the defender AI in ai.js always picks a legal card. -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI tests</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; margin: 16px; max-width: 700px; }
+  h1 { font-size: 20px; }
+  .summary { font-size: 18px; font-weight: 700; padding: 10px 12px; border-radius: 8px; }
+  .summary.pass { background: #d7f2dc; color: #0b5d2a; }
+  .summary.fail { background: #fbd9d9; color: #8a1111; }
+  ul { padding-left: 0; list-style: none; }
+  li { padding: 6px 0; border-bottom: 1px solid #ddd; }
+  .ok::before { content: "\2713  "; color: #0b7a30; font-weight: 700; }
+  .bad::before { content: "\2717  "; color: #b00020; font-weight: 700; }
+  .detail { color: #555; font-size: 14px; }
+</style>
+</head>
+<body>
+<h1>Defender AI tests</h1>
+<div id="summary" class="summary">Running…</div>
+<ul id="results"></ul>
+
+<script src="cards.js"></script>
+<script src="rules.js"></script>
+<script src="ai.js"></script>
+<script>
+// Test code for ai.js (kept in this page; no frameworks).
+(function () {
+  'use strict';
+  var Bridge = window.Bridge;
+  var results = [];
+
+  function record(name, ok, detail) {
+    results.push({ name: name, ok: ok, detail: detail || '' });
+  }
+
+  // Small seeded random number generator so any failure can be reproduced.
+  function makeRng(seed) {
+    var s = seed >>> 0;
+    return function () {
+      s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+      return s / 4294967296;
+    };
+  }
+
+  function pick(list, rng) {
+    return list[Math.floor(rng() * list.length)];
+  }
+
+  function randomContract(rng) {
+    return {
+      level: 1 + Math.floor(rng() * 7),
+      strain: pick(['C', 'D', 'H', 'S', 'NT'], rng),
+      doubled: Math.floor(rng() * 3),
+      declarer: pick(['N', 'E', 'S', 'W'], rng)
+    };
+  }
+
+  // Checks a chosen card without relying on legalPlays: it must be in the hand and must follow suit if possible.
+  function independentLegalityProblem(state, card) {
+    var hand = state.handsRemaining[state.toPlay];
+    if (typeof card !== 'string') return 'the card is not a string: ' + JSON.stringify(card);
+    if (hand.indexOf(card) < 0) return state.toPlay + ' does not hold ' + card;
+    if (state.currentTrick.length > 0) {
+      var led = state.currentTrick[0].card.charAt(0);
+      var hasLed = hand.some(function (c) { return c.charAt(0) === led; });
+      if (hasLed && card.charAt(0) !== led) return state.toPlay + ' held ' + led + ' but played ' + card;
+    }
+    return null;
+  }
+
+  // Test 1: many full random games. Defenders use the AI; declarer and dummy use random legal cards.
+  function testManyGames() {
+    var GAMES = 500;
+    var rng = makeRng(12345);
+    var checked = 0;
+    var problem = null;
+    for (var g = 0; g < GAMES && !problem; g++) {
+      var deal = Bridge.dealRandom(rng);
+      var state = Bridge.newGame(deal, randomContract(rng));
+      var plays = 0;
+      while (!Bridge.isFinished(state) && !problem) {
+        var card;
+        if (Bridge.isUserTurn(state)) {
+          card = pick(Bridge.legalPlays(state), rng);
+        } else {
+          card = Bridge.randomDefenderCard(state, rng);
+          checked++;
+          var why = independentLegalityProblem(state, card);
+          if (!why && Bridge.legalPlays(state).indexOf(card) < 0) why = card + ' is not in legalPlays';
+          if (why) problem = 'game ' + g + ', trick ' + (state.completedTricks.length + 1) + ': ' + why;
+        }
+        if (!problem) {
+          state = Bridge.playCard(state, card); // throws if the card were illegal
+          plays++;
+        }
+      }
+      if (!problem && (plays !== 52 || state.tricksWon.NS + state.tricksWon.EW !== 13)) {
+        problem = 'game ' + g + ' did not finish cleanly (' + plays + ' plays)';
+      }
+    }
+    record('Random defender card is always legal across ' + GAMES + ' full games (' + checked + ' defender choices)',
+      !problem, problem || '');
+  }
+
+  // Test 2: from a position with 13 legal cards the choice really varies.
+  function testVariety() {
+    var rng = makeRng(99);
+    var deal = Bridge.dealRandom(rng);
+    var state = Bridge.newGame(deal, { level: 3, strain: 'NT', doubled: 0, declarer: 'S' });
+    var seen = {};
+    for (var i = 0; i < 300; i++) seen[Bridge.randomDefenderCard(state, rng)] = true;
+    var distinct = Object.keys(seen).length;
+    record('Opening lead varies between cards (' + distinct + ' different cards in 300 tries)', distinct > 5);
+  }
+
+  // Test 3: it refuses when it is not a defender's turn or the game is over.
+  function testRefusals() {
+    var rng = makeRng(7);
+    var deal = Bridge.dealRandom(rng);
+    var state = Bridge.newGame(deal, { level: 1, strain: 'NT', doubled: 0, declarer: 'S' });
+    state = Bridge.playCard(state, Bridge.randomDefenderCard(state, rng)); // W leads, N (dummy) is next
+    var threw = false;
+    try { Bridge.randomDefenderCard(state, rng); } catch (e) { threw = true; }
+    record('Throws when it is dummy\'s or declarer\'s turn', threw);
+
+    var finished = state;
+    while (!Bridge.isFinished(finished)) {
+      finished = Bridge.playCard(finished,
+        Bridge.isUserTurn(finished) ? pick(Bridge.legalPlays(finished), rng) : Bridge.randomDefenderCard(finished, rng));
+    }
+    threw = false;
+    try { Bridge.randomDefenderCard(finished, rng); } catch (e) { threw = true; }
+    record('Throws when the game is finished', threw);
+  }
+
+  // Test 4: a legal-play check that must catch an illegal card (so the checker itself is trustworthy).
+  function testCheckerCatchesIllegal() {
+    var deal = Bridge.parsePBNDeal('N:AK42.A53.K63.874 976.T86.T872.QT9 Q53.KQ4.AQ4.A652 JT8.J972.J95.KJ3');
+    var state = Bridge.newGame(deal, { level: 3, strain: 'NT', doubled: 0, declarer: 'S' });
+    state = Bridge.playCard(state, 'SJ'); // W leads a spade; N must follow
+    var bad = independentLegalityProblem(state, 'HA'); // N holds spades, so a heart is illegal
+    record('The independent legality checker rejects an illegal card', bad !== null, bad || 'it accepted HA');
+  }
+
+  [testManyGames, testVariety, testRefusals, testCheckerCatchesIllegal].forEach(function (t) {
+    try { t(); } catch (e) { record(t.name + ' crashed', false, e.message); }
+  });
+
+  var failed = results.filter(function (r) { return !r.ok; }).length;
+  var summary = document.getElementById('summary');
+  summary.textContent = failed === 0 ? 'All ' + results.length + ' tests passed' : failed + ' of ' + results.length + ' tests FAILED';
+  summary.className = 'summary ' + (failed === 0 ? 'pass' : 'fail');
+  var list = document.getElementById('results');
+  results.forEach(function (r) {
+    var li = document.createElement('li');
+    li.className = r.ok ? 'ok' : 'bad';
+    li.appendChild(document.createTextNode(r.name));
+    if (r.detail) {
+      var d = document.createElement('div');
+      d.className = 'detail';
+      d.textContent = r.detail;
+      li.appendChild(d);
+    }
+    list.appendChild(li);
+  });
+})();
+</script>
+</body>
+</html>

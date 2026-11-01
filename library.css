@@ -1,0 +1,23 @@
+/* library.css - Library screen (Session F). Neutral colours; follows light/dark. */
+.lb-screen { padding-bottom: 32px; }
+.lb-top { margin: 0 0 8px; }
+.lb-h { font-size: 20px; margin: 24px 0 4px; }
+.lb-group { font-size: 16px; margin: 16px 0 4px; }
+.lb-sub { font-size: 16px; opacity: .75; margin: 4px 0 8px; }
+.lb-error { font-size: 16px; color: #b00020; margin: 8px 0; }
+@media (prefers-color-scheme: dark) { .lb-error { color: #ff8a80; } }
+.lb-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin: 8px 0; }
+.lb-count { font-size: 16px; }
+.lb-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; margin: 8px 0; border: 1px solid rgba(128,128,128,.45); border-radius: 10px; }
+.lb-info { flex: 1 1 auto; min-width: 0; }
+.lb-title { font-size: 16px; font-weight: 600; }
+.lb-contract { font-size: 16px; }
+.lb-note { font-size: 14px; opacity: .75; margin-top: 2px; }
+.lb-badge { flex: 0 0 auto; font-size: 14px; opacity: .8; white-space: nowrap; }
+.lb-btn { min-height: 44px; min-width: 44px; padding: 0 16px; font-size: 16px; font-family: inherit; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 10px; cursor: pointer; flex: 0 0 auto; }
+.lb-primary { font-weight: 600; }
+.lb-msg { position: sticky; top: 0; z-index: 5; margin: 8px 0; padding: 10px 12px; font-size: 16px; border-radius: 10px; border: 1px solid rgba(128,128,128,.6); background: Canvas; color: CanvasText; }
+.lb-msg-error { border-color: #b00020; }
+.lb-skipped { margin: 8px 0; font-size: 14px; }
+.lb-skipped summary { min-height: 44px; display: flex; align-items: center; cursor: pointer; }
+.lb-skipped ul { margin: 0 0 8px; padding-left: 20px; }

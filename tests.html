@@ -1,0 +1,644 @@
+<!-- tests.html: runs the cards.js tests in the browser and shows PASS or FAIL for each, plus a total. -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bridge cards.js tests</title>
+<style>
+  :root { color-scheme: light dark; --pass: #1a7f37; --fail: #cf222e; --line: #8884; }
+  @media (prefers-color-scheme: dark) { :root { --pass: #3fb950; --fail: #ff7b72; } }
+  body { font: 15px/1.4 system-ui, sans-serif; margin: 0 auto; padding: 16px; max-width: 860px; }
+  h1 { font-size: 20px; margin: 0 0 8px; }
+  #total { font-weight: 700; font-size: 17px; padding: 8px 0 12px; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li { border-top: 1px solid var(--line); padding: 6px 0; }
+  .badge { display: inline-block; min-width: 3.2em; font-weight: 700; font-family: ui-monospace, Menlo, monospace; }
+  .pass .badge, #total.pass { color: var(--pass); }
+  .fail .badge, #total.fail { color: var(--fail); }
+  .msg { display: block; margin: 2px 0 0 3.6em; font-family: ui-monospace, Menlo, monospace; font-size: 13px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>Bridge cards.js tests</h1>
+<div id="total">Running…</div>
+<ul id="results"></ul>
+
+<script src="cards.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  var tests = [];
+  function test(name, fn) { tests.push({ name: name, fn: fn }); }
+
+  // ------------------------------------------------------------ helpers
+
+  function stable(x) {
+    if (Array.isArray(x)) return '[' + x.map(stable).join(',') + ']';
+    if (x && typeof x === 'object') {
+      return '{' + Object.keys(x).sort().map(function (k) {
+        return JSON.stringify(k) + ':' + stable(x[k]);
+      }).join(',') + '}';
+    }
+    return JSON.stringify(x);
+  }
+  function assert(cond, msg) { if (!cond) throw new Error(msg || 'Assertion failed'); }
+  function assertEqual(actual, expected, msg) {
+    var a = stable(actual), e = stable(expected);
+    if (a !== e) throw new Error((msg ? msg + ': ' : '') + 'expected ' + e + ' but got ' + a);
+  }
+  function assertNotEqual(a, b, msg) {
+    if (stable(a) === stable(b)) throw new Error((msg || 'Values should differ') + ': both are ' + stable(a));
+  }
+  function assertThrows(fn, pattern, msg) {
+    var err = null;
+    try { fn(); } catch (e) { err = e; }
+    if (!err) throw new Error((msg || 'Expected an error') + ', but nothing was thrown');
+    if (pattern && !pattern.test(err.message)) {
+      throw new Error('Error message ' + JSON.stringify(err.message) + ' does not match ' + pattern);
+    }
+  }
+  function withoutSource(stored) {
+    var copy = JSON.parse(JSON.stringify(stored));
+    delete copy.source;
+    return copy;
+  }
+  function mulberry32(seed) {
+    var a = seed;
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      var t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  function B() { return window.Bridge; }
+
+  // ------------------------------------------------------------ sample data
+
+  var DEAL_TEXT = 'N:AK84.Q73.KJ5.A92 QJ7.AJ95.Q84.KJ3 T952.K862.A63.Q4 63.T4.T972.T8765';
+  var VOID_TEXT = 'N:AKQJT98765432.-.-.- -.AKQJT98765432.-.- -.-.AKQJT98765432.- -.-.-.AKQJT98765432';
+
+  // Dealer E, contract 4S by S.
+  var RECORD_4S = [
+    '[Event "Test"]',
+    '[Dealer "E"]',
+    '[Vulnerable "NS"]',
+    '[Deal "' + DEAL_TEXT + '"]',
+    '[Auction "E"]',
+    'Pass 1S Pass 4S',
+    'Pass Pass Pass',
+    '[Contract "4S"]',
+    '[Declarer "S"]'
+  ].join('\n');
+
+  function record(parts) {
+    var lines = [];
+    if (parts.dealer !== undefined) lines.push('[Dealer "' + parts.dealer + '"]');
+    if (parts.vul !== undefined) lines.push('[Vulnerable "' + parts.vul + '"]');
+    if (parts.deal !== null) lines.push('[Deal "' + (parts.deal || DEAL_TEXT) + '"]');
+    if (parts.auctionTag !== undefined) lines.push('[Auction "' + parts.auctionTag + '"]');
+    if (parts.calls) lines.push(parts.calls);
+    if (parts.contract !== undefined) lines.push('[Contract "' + parts.contract + '"]');
+    if (parts.declarer !== undefined) lines.push('[Declarer "' + parts.declarer + '"]');
+    return lines.join('\n');
+  }
+
+  // ------------------------------------------------------------ constants
+
+  test('constants: suits, ranks and seats', function () {
+    assertEqual(B().SUITS.join(''), 'SHDC');
+    assertEqual(B().RANKS.join(''), '23456789TJQKA');
+    assertEqual(B().SEATS.join(''), 'NESW');
+  });
+
+  // ------------------------------------------------------------ card conversion
+
+  test('cards: string to {suit, rank}', function () {
+    assertEqual(B().stringToCard('SA'), { suit: 'S', rank: 'A' });
+    assertEqual(B().stringToCard('HT'), { suit: 'H', rank: 'T' });
+    assertEqual(B().stringToCard('C2'), { suit: 'C', rank: '2' });
+  });
+
+  test('cards: {suit, rank} to string', function () {
+    assertEqual(B().cardToString({ suit: 'S', rank: 'A' }), 'SA');
+    assertEqual(B().cardToString({ suit: 'D', rank: '2' }), 'D2');
+  });
+
+  test('cards: all 52 convert both ways', function () {
+    B().SUITS.forEach(function (s) {
+      B().RANKS.forEach(function (r) {
+        var str = s + r;
+        assertEqual(B().cardToString(B().stringToCard(str)), str);
+      });
+    });
+  });
+
+  test('cards: invalid card strings and objects are rejected', function () {
+    ['XA', 'S1', 'SAA', 'S', '', 'sa', null, undefined, 12].forEach(function (bad) {
+      assertThrows(function () { B().stringToCard(bad); }, /Invalid card/, 'stringToCard(' + String(bad) + ')');
+    });
+    assertThrows(function () { B().cardToString({ suit: 'X', rank: 'A' }); }, /Invalid card/);
+    assertThrows(function () { B().cardToString(null); }, /Invalid card/);
+  });
+
+  // ------------------------------------------------------------ deck and shuffle
+
+  test('deck: 52 distinct cards, every suit and rank', function () {
+    var deck = B().makeDeck();
+    assertEqual(deck.length, 52);
+    var seen = {};
+    deck.forEach(function (c) { seen[c] = true; });
+    assertEqual(Object.keys(seen).length, 52);
+    B().SUITS.forEach(function (s) {
+      B().RANKS.forEach(function (r) { assert(seen[s + r], 'missing ' + s + r); });
+    });
+  });
+
+  test('shuffle: same seeded rng gives the same order', function () {
+    var a = B().shuffle(B().makeDeck(), mulberry32(7));
+    var b = B().shuffle(B().makeDeck(), mulberry32(7));
+    assertEqual(a, b);
+  });
+
+  test('shuffle: different seeds give different orders', function () {
+    var a = B().shuffle(B().makeDeck(), mulberry32(1));
+    var b = B().shuffle(B().makeDeck(), mulberry32(2));
+    assertNotEqual(a, b);
+  });
+
+  test('shuffle: result is a permutation and the input is not changed', function () {
+    var deck = B().makeDeck();
+    var before = deck.slice();
+    var out = B().shuffle(deck, mulberry32(3));
+    assertEqual(deck, before, 'input changed');
+    assertEqual(out.slice().sort(), before.slice().sort());
+    assertNotEqual(out, before, 'shuffle left the deck in order');
+  });
+
+  test('shuffle: known seeded output stays the same', function () {
+    assertEqual(B().shuffle(B().makeDeck(), mulberry32(1)).slice(0, 5), ['HK', 'C7', 'HQ', 'SQ', 'C6']);
+  });
+
+  test('shuffle: works without an rng and rejects a bad one', function () {
+    var out = B().shuffle(B().makeDeck());
+    assertEqual(out.length, 52);
+    assertThrows(function () { B().shuffle(B().makeDeck(), function () { return 1; }); }, /rng/);
+    assertThrows(function () { B().shuffle(B().makeDeck(), 'nope'); }, /rng/);
+  });
+
+  test('dealRandom: four hands of 13, 52 distinct cards, each hand sorted', function () {
+    var deal = B().dealRandom(mulberry32(11));
+    var seen = {};
+    B().SEATS.forEach(function (seat) {
+      assertEqual(deal[seat].length, 13, seat + ' hand size');
+      assertEqual(deal[seat], B().sortHand(deal[seat]), seat + ' hand sorted');
+      deal[seat].forEach(function (c) { seen[c] = true; });
+    });
+    assertEqual(Object.keys(seen).length, 52);
+  });
+
+  test('dealRandom: repeatable with the same seed, different with another', function () {
+    assertEqual(B().dealRandom(mulberry32(5)), B().dealRandom(mulberry32(5)));
+    assertNotEqual(B().dealRandom(mulberry32(5)), B().dealRandom(mulberry32(6)));
+  });
+
+  test('dealRandom: known seeded deal stays the same', function () {
+    assertEqual(B().formatPBNDeal(B().dealRandom(mulberry32(42)), 'N'),
+      'N:84.AQ32.JT.AQT64 J765.85.3.KJ8732 K932.T764.K962.9 AQT.KJ9.AQ8754.5');
+  });
+
+  // ------------------------------------------------------------ sortHand
+
+  test('sortHand: suits S, H, D, C and high to low', function () {
+    assertEqual(B().sortHand(['C2', 'SA', 'HK', 'S2', 'DQ', 'CA', 'S9', 'ST']),
+      ['SA', 'ST', 'S9', 'S2', 'HK', 'DQ', 'CA', 'C2']);
+  });
+
+  test('sortHand: returns a new array and handles an empty hand', function () {
+    var hand = ['C2', 'SA'];
+    var out = B().sortHand(hand);
+    assertEqual(hand, ['C2', 'SA'], 'input changed');
+    assert(out !== hand, 'should be a new array');
+    assertEqual(B().sortHand([]), []);
+  });
+
+  // ------------------------------------------------------------ PBN deal
+
+  test('parsePBNDeal: reads a normal deal', function () {
+    var deal = B().parsePBNDeal(DEAL_TEXT);
+    assertEqual(deal.N, ['SA', 'SK', 'S8', 'S4', 'HQ', 'H7', 'H3', 'DK', 'DJ', 'D5', 'CA', 'C9', 'C2']);
+    assertEqual(deal.E.length, 13);
+    assertEqual(deal.S[0], 'ST');
+    assertEqual(deal.W, ['S6', 'S3', 'HT', 'H4', 'DT', 'D9', 'D7', 'D2', 'CT', 'C8', 'C7', 'C6', 'C5']);
+  });
+
+  test('formatPBNDeal: writes the same text back from North', function () {
+    assertEqual(B().formatPBNDeal(B().parsePBNDeal(DEAL_TEXT), 'N'), DEAL_TEXT);
+    assertEqual(B().formatPBNDeal(B().parsePBNDeal(DEAL_TEXT)), DEAL_TEXT, 'default first seat is N');
+  });
+
+  test('formatPBNDeal: starts at the chosen seat and goes clockwise', function () {
+    var deal = B().parsePBNDeal(DEAL_TEXT);
+    assertEqual(B().formatPBNDeal(deal, 'E'),
+      'E:QJ7.AJ95.Q84.KJ3 T952.K862.A63.Q4 63.T4.T972.T8765 AK84.Q73.KJ5.A92');
+    assertEqual(B().formatPBNDeal(deal, 'W'),
+      'W:63.T4.T972.T8765 AK84.Q73.KJ5.A92 QJ7.AJ95.Q84.KJ3 T952.K862.A63.Q4');
+  });
+
+  test('parsePBNDeal: accepts any first seat and gives the same deal', function () {
+    var deal = B().parsePBNDeal(DEAL_TEXT);
+    ['N', 'E', 'S', 'W'].forEach(function (first) {
+      assertEqual(B().parsePBNDeal(B().formatPBNDeal(deal, first)), deal, 'first seat ' + first);
+    });
+  });
+
+  test('round trip: format then parse gives the same deal (random deals, every first seat)', function () {
+    for (var seed = 1; seed <= 20; seed++) {
+      var deal = B().dealRandom(mulberry32(seed));
+      B().SEATS.forEach(function (first) {
+        assertEqual(B().parsePBNDeal(B().formatPBNDeal(deal, first)), deal, 'seed ' + seed + ' first ' + first);
+      });
+    }
+  });
+
+  test('void: all four voids parse and format with "-"', function () {
+    var deal = B().parsePBNDeal(VOID_TEXT);
+    assertEqual(deal.N.length, 13);
+    assert(deal.N.every(function (c) { return c.charAt(0) === 'S'; }), 'North should hold only spades');
+    assertEqual(deal.E.filter(function (c) { return c.charAt(0) === 'S'; }).length, 0);
+    assertEqual(B().formatPBNDeal(deal, 'N'), VOID_TEXT);
+    assertEqual(B().parsePBNDeal(B().formatPBNDeal(deal, 'S')), deal, 'void round trip');
+  });
+
+  test('void: a random deal that contains a void round-trips', function () {
+    var found = null;
+    for (var seed = 1; seed <= 500 && !found; seed++) {
+      var deal = B().dealRandom(mulberry32(seed));
+      var text = B().formatPBNDeal(deal, 'N');
+      if (text.split(' ').some(function (h) { return h.split('.').indexOf('-') >= 0; })) found = { deal: deal, text: text };
+    }
+    assert(found, 'no seeded deal with a void was found');
+    assert(found.text.indexOf('-') >= 0, 'void should be written as -');
+    assertEqual(B().parsePBNDeal(found.text), found.deal);
+  });
+
+  test('parsePBNDeal: malformed deals give clear errors', function () {
+    var cases = [
+      ['hand with 12 cards', 'N:AK84.Q73.KJ5.A9 QJ7.AJ95.Q84.KJ3 T952.K862.A63.Q4 63.T4.T972.T8765', /N hand has 12 cards, expected 13/],
+      ['hand with 14 cards', 'N:AK84.Q73.KJ5.A922 QJ7.AJ95.Q84.KJ3 T952.K862.A63.Q4 63.T4.T972.T8765', /N hand has 14 cards/],
+      ['only three hands', 'N:AK84.Q73.KJ5.A92 QJ7.AJ95.Q84.KJ3 T952.K862.A63.Q4', /4 hands.*found 3/],
+      ['five hands', DEAL_TEXT + ' AKQ.-.-.-', /4 hands.*found 5/],
+      ['duplicate card across hands', 'N:AK84.Q73.KJ5.A92 QJ7.AJ95.Q84.KJ3 T952.K862.A63.Q4 A3.T4.T972.T8765', /SA appears in both the N and W hands/],
+      ['duplicate card in one hand', 'N:AAK8.Q73.KJ5.A92 QJ7.AJ95.Q84.KJ3 T952.K862.A63.Q4 63.T4.T972.T8765', /SA appears twice in the N hand/],
+      ['invalid rank character', 'N:AK84.Q73.KJ5.A9Z QJ7.AJ95.Q84.KJ3 T952.K862.A63.Q4 63.T4.T972.T8765', /invalid rank character "Z"/],
+      ['ten written as 10', 'N:AK84.Q73.KJ5.A92 QJ7.AJ95.Q84.KJ3 T952.K862.A63.Q4 63.10.T972.T8765', /invalid rank character "1"/],
+      ['only three suits in a hand', 'N:AK84.Q73.KJ5 QJ7.AJ95.Q84.KJ3 T952.K862.A63.Q4 63.T4.T972.T8765', /needs 4 suits.*found 3/],
+      ['empty suit instead of a dash', 'N:AK84.Q73.KJ5. QJ7.AJ95.Q84.KJ3 T952.K862.A63.Q4 63.T4.T972.T8765', /empty C suit; write -/],
+      ['missing seat letter', 'AK84.Q73.KJ5.A92 QJ7.AJ95.Q84.KJ3 T952.K862.A63.Q4 63.T4.T972.T8765', /seat letter and a colon/],
+      ['bad seat letter', 'X:AK84.Q73.KJ5.A92 QJ7.AJ95.Q84.KJ3 T952.K862.A63.Q4 63.T4.T972.T8765', /seat letter and a colon/],
+      ['empty text', '', /seat letter and a colon/],
+      ['no hands', 'N:', /4 hands.*found 0/]
+    ];
+    cases.forEach(function (c) {
+      assertThrows(function () { B().parsePBNDeal(c[1]); }, c[2], c[0]);
+    });
+    assertThrows(function () { B().parsePBNDeal(null); }, /must be a string/);
+  });
+
+  test('formatPBNDeal: rejects an invalid deal or first seat', function () {
+    var deal = B().parsePBNDeal(DEAL_TEXT);
+    var short = JSON.parse(JSON.stringify(deal));
+    short.N.pop();
+    assertThrows(function () { B().formatPBNDeal(short, 'N'); }, /N hand has 12 cards, expected 13/);
+    var dup = JSON.parse(JSON.stringify(deal));
+    dup.E[0] = dup.N[0];
+    assertThrows(function () { B().formatPBNDeal(dup, 'N'); }, /appears in both/);
+    assertThrows(function () { B().formatPBNDeal(deal, 'Q'); }, /first seat/);
+    assertThrows(function () { B().formatPBNDeal({ N: [], E: [], S: [], W: [] }, 'N'); }, /expected 13/);
+    assertThrows(function () { B().formatPBNDeal(null, 'N'); }, /object/);
+  });
+
+  // ------------------------------------------------------------ PBN record
+
+  test('parsePBNRecord: reads every tag into a Stored deal', function () {
+    var s = B().parsePBNRecord(RECORD_4S);
+    assertEqual(s.deal, B().parsePBNDeal(DEAL_TEXT));
+    assertEqual(s.dealer, 'E');
+    assertEqual(s.vulnerability, { NS: true, EW: false });
+    assertEqual(s.auction, ['P', '1S', 'P', '4S', 'P', 'P', 'P']);
+    assertEqual(s.contract, { level: 4, strain: 'S', doubled: 0, declarer: 'S' });
+    assertEqual(typeof s.id, 'string');
+    assert(!('source' in s), 'parsePBNRecord must leave source unset');
+  });
+
+  test('vulnerability: None, NS, EW and All all parse and format', function () {
+    var expected = {
+      None: { NS: false, EW: false },
+      NS: { NS: true, EW: false },
+      EW: { NS: false, EW: true },
+      All: { NS: true, EW: true }
+    };
+    Object.keys(expected).forEach(function (tag) {
+      var text = record({ dealer: 'N', vul: tag, contract: '4S', declarer: 'S' });
+      var s = B().parsePBNRecord(text);
+      assertEqual(s.vulnerability, expected[tag], 'parse ' + tag);
+      assert(B().formatPBNRecord(s).indexOf('[Vulnerable "' + tag + '"]') >= 0, 'format ' + tag);
+      assertEqual(B().parsePBNRecord(B().formatPBNRecord(s)).vulnerability, expected[tag], 'round trip ' + tag);
+    });
+    var lower = B().parsePBNRecord(record({ vul: 'ns', contract: '4S', declarer: 'S' }));
+    assertEqual(lower.vulnerability, { NS: true, EW: false }, 'case-insensitive');
+    assertThrows(function () {
+      B().parsePBNRecord(record({ vul: 'Both', contract: '4S', declarer: 'S' }));
+    }, /Vulnerable.*None, NS, EW or All/);
+  });
+
+  test('contracts: 4S, 3NTX and 6HXX with matching auctions', function () {
+    var c1 = B().parsePBNRecord(record({ dealer: 'N', auctionTag: 'N', calls: '1NT Pass 3NT X\nPass Pass Pass', contract: '3NTX', declarer: 'N' }));
+    assertEqual(c1.contract, { level: 3, strain: 'NT', doubled: 1, declarer: 'N' });
+    var c2 = B().parsePBNRecord(record({ dealer: 'S', auctionTag: 'S', calls: '1H Pass 6H X\nXX Pass Pass Pass', contract: '6HXX', declarer: 'S' }));
+    assertEqual(c2.contract, { level: 6, strain: 'H', doubled: 2, declarer: 'S' });
+    var c3 = B().parsePBNRecord(record({ contract: '7NT', declarer: 'W' }));
+    assertEqual(c3.contract, { level: 7, strain: 'NT', doubled: 0, declarer: 'W' });
+    [c1, c2, c3].forEach(function (s) {
+      assertEqual(withoutSource(B().parsePBNRecord(B().formatPBNRecord(s))), withoutSource(s));
+    });
+    assert(B().formatPBNRecord(c1).indexOf('[Contract "3NTX"]') >= 0);
+    assert(B().formatPBNRecord(c2).indexOf('[Contract "6HXX"]') >= 0);
+  });
+
+  test('contracts: invalid Contract and Declarer values are rejected', function () {
+    ['8S', '0S', '4Z', '4SXXX', 'S4', '', '4'].forEach(function (bad) {
+      assertThrows(function () {
+        B().parsePBNRecord(record({ contract: bad, declarer: 'S' }));
+      }, /Invalid Contract/, 'Contract ' + JSON.stringify(bad));
+    });
+    assertThrows(function () {
+      B().parsePBNRecord(record({ contract: '4S', declarer: 'Q' }));
+    }, /Declarer must be one of N, E, S, W/);
+  });
+
+  test('defaults: Dealer is N and Vulnerable is None when the tags are missing', function () {
+    var s = B().parsePBNRecord(record({ contract: '4S', declarer: 'S' }));
+    assertEqual(s.dealer, 'N');
+    assertEqual(s.vulnerability, { NS: false, EW: false });
+  });
+
+  test('required tags: missing Deal, Contract or Declarer is reported by name', function () {
+    assertThrows(function () { B().parsePBNRecord(record({ deal: null, contract: '4S', declarer: 'S' })); }, /Missing required tag: Deal/);
+    assertThrows(function () { B().parsePBNRecord(record({ declarer: 'S' })); }, /Missing required tag: Contract/);
+    assertThrows(function () { B().parsePBNRecord(record({ contract: '4S' })); }, /Missing required tag: Declarer/);
+    assertThrows(function () { B().parsePBNRecord(''); }, /Missing required tag: Deal/);
+  });
+
+  test('auction: empty auction (no Auction tag) parses and formats', function () {
+    var s = B().parsePBNRecord(record({ dealer: 'W', contract: '3NT', declarer: 'E' }));
+    assertEqual(s.auction, []);
+    var text = B().formatPBNRecord(s);
+    assert(text.indexOf('[Auction') < 0, 'empty auction should not write an Auction tag');
+    assertEqual(withoutSource(B().parsePBNRecord(text)), withoutSource(s));
+  });
+
+  test('auction: an Auction tag with no calls is an empty auction', function () {
+    var s = B().parsePBNRecord(record({ dealer: 'N', auctionTag: 'N', contract: '3NT', declarer: 'E' }));
+    assertEqual(s.auction, []);
+  });
+
+  test('auction: "Pass" and "P" are both accepted; stored as P, exported as Pass', function () {
+    var withWord = B().parsePBNRecord(RECORD_4S);
+    var withLetter = B().parsePBNRecord(RECORD_4S.replace('Pass 1S Pass 4S', 'P 1S P 4S').replace('Pass Pass Pass', 'P P P'));
+    assertEqual(withLetter.auction, withWord.auction);
+    assertEqual(withWord.auction.filter(function (c) { return c === 'P'; }).length, 5);
+    var text = B().formatPBNRecord(withWord);
+    assert(/^Pass 1S Pass 4S$/m.test(text), 'first auction line should read "Pass 1S Pass 4S"');
+    assert(/^Pass Pass Pass$/m.test(text), 'second auction line should read "Pass Pass Pass"');
+    assert(!/(^|\s)P(\s|$)/m.test(text.split('\n').filter(function (l) { return l.charAt(0) !== '['; }).join('\n')),
+      'a bare P must not be written');
+  });
+
+  test('auction: comments, notes and annotations are ignored', function () {
+    var text = RECORD_4S.replace('Pass 1S Pass 4S', 'Pass 1S! {a comment} Pass =1= 4S $5 ; trailing');
+    assertEqual(B().parsePBNRecord(text).auction, ['P', '1S', 'P', '4S', 'P', 'P', 'P']);
+  });
+
+  test('auction: must agree with the contract', function () {
+    assertThrows(function () {
+      B().parsePBNRecord(RECORD_4S.replace('[Contract "4S"]', '[Contract "3S"]'));
+    }, /auction ends in 4S by S but the contract is 3S by S/);
+    assertThrows(function () {
+      B().parsePBNRecord(RECORD_4S.replace('[Declarer "S"]', '[Declarer "N"]'));
+    }, /auction ends in 4S by S but the contract is 4S by N/);
+    assertThrows(function () {
+      B().parsePBNRecord(RECORD_4S.replace('[Contract "4S"]', '[Contract "4SX"]'));
+    }, /auction ends in 4S by S but the contract is 4SX by S/);
+    assertThrows(function () {
+      B().parsePBNRecord(RECORD_4S.replace('Pass Pass Pass', 'Pass Pass'));
+    }, /incomplete.*three passes/);
+    assertThrows(function () {
+      B().parsePBNRecord(RECORD_4S.replace('Pass 1S Pass 4S', 'Pass X Pass 4S'));
+    }, /X before any bid/);
+    assertThrows(function () {
+      B().parsePBNRecord(RECORD_4S.replace('[Auction "E"]', '[Auction "W"]'));
+    }, /Auction tag names W as first caller but the dealer is E/);
+    assertThrows(function () {
+      B().parsePBNRecord(RECORD_4S.replace('Pass 1S Pass 4S', 'Pass 1S Pass 4Z'));
+    }, /Unrecognised call/);
+  });
+
+  test('passed-out deals are rejected with a clear message', function () {
+    assertThrows(function () {
+      B().parsePBNRecord(record({ dealer: 'N', auctionTag: 'N', calls: 'Pass Pass Pass Pass', contract: 'Pass', declarer: '' }));
+    }, /passed out.*no contract to play/i);
+    assertThrows(function () {
+      B().parsePBNRecord(record({ contract: 'Pass' }));
+    }, /passed out/i);
+    assertThrows(function () {
+      B().parsePBNRecord(record({ dealer: 'N', auctionTag: 'N', calls: 'Pass Pass Pass Pass', contract: '4S', declarer: 'S' }));
+    }, /auction is passed out/i);
+  });
+
+  test('parsePBNRecord: handles CRLF, BOM, extra tags and blank lines', function () {
+    var text = '\uFEFF' + RECORD_4S.split('\n').join('\r\n') + '\r\n\r\n[Result "10"]\r\n';
+    var s = B().parsePBNRecord(text);
+    assertEqual(s.contract.level, 4);
+    assertEqual(s.auction.length, 7);
+  });
+
+  test('parsePBNRecord: a Deal starting at East gives the same deal as one starting at North', function () {
+    var east = B().formatPBNDeal(B().parsePBNDeal(DEAL_TEXT), 'E');
+    var a = B().parsePBNRecord(RECORD_4S);
+    var b = B().parsePBNRecord(RECORD_4S.replace(DEAL_TEXT, east));
+    assertEqual(b.deal, a.deal);
+    assertEqual(b, a);
+  });
+
+  test('parsePBNRecord: malformed input is rejected', function () {
+    assertThrows(function () { B().parsePBNRecord('[Deal "oops]\n'); }, /Malformed PBN tag line/);
+    assertThrows(function () { B().parsePBNRecord(RECORD_4S + '\n[Contract "4S"]'); }, /Contract appears more than once/);
+    assertThrows(function () { B().parsePBNRecord(RECORD_4S.replace(DEAL_TEXT, 'N:AK84')); }, /4 hands/);
+    assertThrows(function () { B().parsePBNRecord(undefined); }, /must be a string/);
+  });
+
+  test('formatPBNRecord: output layout and ignored fields', function () {
+    var s = B().parsePBNRecord(RECORD_4S);
+    s.source = 'library';
+    var text = B().formatPBNRecord(s);
+    assertEqual(text, [
+      '[Dealer "E"]',
+      '[Vulnerable "NS"]',
+      '[Deal "' + DEAL_TEXT + '"]',
+      '[Auction "E"]',
+      'Pass 1S Pass 4S',
+      'Pass Pass Pass',
+      '[Contract "4S"]',
+      '[Declarer "S"]',
+      ''
+    ].join('\n'));
+    assert(text.indexOf('library') < 0, 'source must not be written');
+  });
+
+  test('formatPBNRecord: rejects bad Stored deals', function () {
+    var good = B().parsePBNRecord(RECORD_4S);
+    function variant(change) {
+      var copy = JSON.parse(JSON.stringify(good));
+      change(copy);
+      return copy;
+    }
+    assertThrows(function () { B().formatPBNRecord(null); }, /Stored deal/);
+    assertThrows(function () { B().formatPBNRecord(variant(function (s) { s.deal.N.pop(); })); }, /N hand has 12 cards/);
+    assertThrows(function () { B().formatPBNRecord(variant(function (s) { s.dealer = 'Q'; })); }, /Dealer/);
+    assertThrows(function () { B().formatPBNRecord(variant(function (s) { s.vulnerability = { NS: 'yes', EW: false }; })); }, /vulnerability/);
+    assertThrows(function () { B().formatPBNRecord(variant(function (s) { s.auction = 'nope'; })); }, /auction must be an array/);
+    assertThrows(function () { B().formatPBNRecord(variant(function (s) { s.auction[1] = '9Z'; })); }, /Unrecognised call/);
+    assertThrows(function () { B().formatPBNRecord(variant(function (s) { s.contract.level = 8; })); }, /level/);
+    assertThrows(function () { B().formatPBNRecord(variant(function (s) { s.contract.strain = 'Z'; })); }, /strain/);
+    assertThrows(function () { B().formatPBNRecord(variant(function (s) { s.contract.doubled = 3; })); }, /doubled/);
+    assertThrows(function () { B().formatPBNRecord(variant(function (s) { s.contract.declarer = 'N'; })); }, /auction ends in 4S by S/);
+  });
+
+  test('round trip: Stored deal -> PBN record -> Stored deal (everything except source)', function () {
+    var cases = [
+      { dealer: 'N', vul: 'None', contract: '4S', declarer: 'S' },
+      { dealer: 'E', vul: 'All', auctionTag: 'E', calls: '1H Pass 2H Pass\n4H Pass Pass Pass', contract: '4H', declarer: 'E' },
+      { dealer: 'W', vul: 'EW', auctionTag: 'W', calls: '1NT X XX Pass\n3NT Pass Pass Pass', contract: '3NT', declarer: 'W' },
+      { dealer: 'S', vul: 'NS', auctionTag: 'S', calls: '1H Pass 6H X\nXX Pass Pass Pass', contract: '6HXX', declarer: 'S' },
+      { dealer: 'N', vul: 'None', deal: VOID_TEXT, contract: '7S', declarer: 'N' }
+    ];
+    cases.forEach(function (c, i) {
+      var parsed = B().parsePBNRecord(record(c));
+      parsed.source = 'authored';
+      var again = B().parsePBNRecord(B().formatPBNRecord(parsed));
+      assert(!('source' in again), 'source cannot survive PBN');
+      assertEqual(withoutSource(again), withoutSource(parsed), 'case ' + i);
+    });
+    for (var seed = 1; seed <= 10; seed++) {
+      var s = {
+        id: 'x',
+        deal: B().dealRandom(mulberry32(seed)),
+        dealer: B().SEATS[seed % 4],
+        vulnerability: { NS: seed % 2 === 0, EW: seed % 3 === 0 },
+        auction: [],
+        contract: { level: 1 + (seed % 7), strain: ['C', 'D', 'H', 'S', 'NT'][seed % 5], doubled: seed % 3, declarer: B().SEATS[(seed + 1) % 4] },
+        source: 'random'
+      };
+      s.id = B().dealId(s.deal, s.contract);
+      var back = B().parsePBNRecord(B().formatPBNRecord(s));
+      assertEqual(withoutSource(back), withoutSource(s), 'random record ' + seed);
+    }
+  });
+
+  // ------------------------------------------------------------ deal id
+
+  var CONTRACT_4S = { level: 4, strain: 'S', doubled: 0, declarer: 'S' };
+
+  test('id: is a string and has a known, fixed value', function () {
+    var id = B().dealId(B().parsePBNDeal(DEAL_TEXT), CONTRACT_4S);
+    assertEqual(typeof id, 'string');
+    assertEqual(id, 'N:AK84.Q73.KJ5.A92_QJ7.AJ95.Q84.KJ3_T952.K862.A63.Q4_63.T4.T972.T8765|4S|S');
+  });
+
+  test('id: the same deal and contract always give the same id', function () {
+    var a = B().parsePBNRecord(RECORD_4S).id;
+    var b = B().parsePBNRecord(RECORD_4S).id;
+    assertEqual(a, b);
+    assertEqual(a, B().dealId(B().parsePBNDeal(DEAL_TEXT), CONTRACT_4S));
+    assertEqual(B().dealId(B().parsePBNDeal(DEAL_TEXT), { declarer: 'S', doubled: 0, strain: 'S', level: 4 }), a, 'key order');
+  });
+
+  test('id: unaffected by first seat, dealer, vulnerability, auction and source', function () {
+    var base = B().parsePBNRecord(RECORD_4S).id;
+    var east = B().formatPBNDeal(B().parsePBNDeal(DEAL_TEXT), 'E');
+    assertEqual(B().parsePBNRecord(RECORD_4S.replace(DEAL_TEXT, east)).id, base, 'first seat');
+    assertEqual(B().parsePBNRecord(record({ dealer: 'W', vul: 'All', contract: '4S', declarer: 'S' })).id, base, 'dealer, vulnerability, no auction');
+    var stored = B().parsePBNRecord(RECORD_4S);
+    stored.source = 'shared';
+    assertEqual(B().parsePBNRecord(B().formatPBNRecord(stored)).id, base, 'after export and import');
+  });
+
+  test('id: changes when the cards or the contract change', function () {
+    var deal = B().parsePBNDeal(DEAL_TEXT);
+    var base = B().dealId(deal, CONTRACT_4S);
+    var swapped = JSON.parse(JSON.stringify(deal));
+    var tmp = swapped.N[0]; swapped.N[0] = swapped.E[0]; swapped.E[0] = tmp;
+    assertNotEqual(B().dealId(swapped, CONTRACT_4S), base, 'cards');
+    assertNotEqual(B().dealId(deal, { level: 5, strain: 'S', doubled: 0, declarer: 'S' }), base, 'level');
+    assertNotEqual(B().dealId(deal, { level: 4, strain: 'H', doubled: 0, declarer: 'S' }), base, 'strain');
+    assertNotEqual(B().dealId(deal, { level: 4, strain: 'S', doubled: 1, declarer: 'S' }), base, 'doubled');
+    assertNotEqual(B().dealId(deal, { level: 4, strain: 'S', doubled: 0, declarer: 'N' }), base, 'declarer');
+  });
+
+  test('id: rejects an invalid deal or contract', function () {
+    var deal = B().parsePBNDeal(DEAL_TEXT);
+    assertThrows(function () { B().dealId({ N: [], E: [], S: [], W: [] }, CONTRACT_4S); }, /expected 13/);
+    assertThrows(function () { B().dealId(deal, { level: 9, strain: 'S', doubled: 0, declarer: 'S' }); }, /level/);
+    assertThrows(function () { B().dealId(deal, null); }, /contract/);
+  });
+
+  // ------------------------------------------------------------ run and report
+
+  var list = document.getElementById('results');
+  var totalEl = document.getElementById('total');
+
+  function addRow(name, ok, message) {
+    var li = document.createElement('li');
+    li.className = ok ? 'pass' : 'fail';
+    var badge = document.createElement('span');
+    badge.className = 'badge';
+    badge.textContent = ok ? 'PASS' : 'FAIL';
+    li.appendChild(badge);
+    li.appendChild(document.createTextNode(name));
+    if (message) {
+      var msg = document.createElement('span');
+      msg.className = 'msg';
+      msg.textContent = message;
+      li.appendChild(msg);
+    }
+    list.appendChild(li);
+  }
+
+  var passed = 0;
+  if (!window.Bridge) {
+    addRow('cards.js loads and defines window.Bridge', false,
+      'window.Bridge is missing. Check that cards.js sits next to tests.html and has no syntax errors (see the browser console).');
+  } else {
+    tests.forEach(function (t) {
+      try {
+        t.fn();
+        passed++;
+        addRow(t.name, true);
+      } catch (e) {
+        addRow(t.name, false, e && e.message ? e.message : String(e));
+      }
+    });
+  }
+  var total = window.Bridge ? tests.length : 1;
+  var allOk = window.Bridge && passed === total;
+  totalEl.className = allOk ? 'pass' : 'fail';
+  totalEl.textContent = (allOk ? 'PASS' : 'FAIL') + ': ' + passed + ' of ' + total + ' tests passed' +
+    (allOk ? '' : ', ' + (total - passed) + ' failed');
+  document.title = (allOk ? 'PASS' : 'FAIL') + ' ' + passed + '/' + total + ' - Bridge cards.js tests';
+})();
+</script>
+</body>
+</html>
