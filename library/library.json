@@ -10,7 +10,8 @@
         { "title": "Starter hand 1", "note": "nine top tricks plus the club ace" },
         { "title": "Starter hand 2", "note": "straightforward, ten or eleven tricks" },
         { "title": "Starter hand 3", "note": "hard: needs the diamond finesse" },
-        { "title": "Starter hand 4", "note": "declarer is not South" }
+        { "title": "Starter hand 4", "note": "declarer is not South" },
+        { "title": "First new hand", "note": "this is going to be fascinating" }
       ]
     }
   ]
