@@ -27,3 +27,9 @@
 4H Pass Pass Pass
 [Contract "4H"]
 [Declarer "E"]
+
+[Dealer "E"]
+[Vulnerable "None"]
+[Deal "N:5.K965.J86.AQ985 AT74.AJ4.Q3.7432 KQJ86.QT87.975.J 932.32.AKT42.KT6"]
+[Contract "3NT"]
+[Declarer "S"]
