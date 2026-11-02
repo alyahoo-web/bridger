@@ -33,3 +33,33 @@
 [Deal "N:5.K965.J86.AQ985 AT74.AJ4.Q3.7432 KQJ86.QT87.975.J 932.32.AKT42.KT6"]
 [Contract "3NT"]
 [Declarer "S"]
+
+[Dealer "W"]
+[Vulnerable "None"]
+[Deal "W:984.74.KJ54.Q853 J76.AT52.T63.AJ6 AK53.9.872.KT742 QT2.KQJ863.AQ9.9"]
+[Declarer "S"]
+[Contract "4H"]
+[Auction "W"]
+Pass 1H Pass 1S
+Pass 3H Pass 4H
+Pass Pass Pass
+
+[Dealer "N"]
+[Vulnerable "none"]
+[Deal "N:K.KQT65.JT54.KJ5 T73.84.Q9.AQT763 Q6.AJ72.K8732.94 AJ98542.93.A6.82"]
+
+[Dealer "S"]
+[Vulnerable "none"]
+[Deal "S:543.8.KQJ9865.Q3 QJ7.T2.7432.8652 6.QJ976.T.KJT974 AKT982.AK543.A.A"]
+
+[Dealer "W"]
+[Vulnerable "none"]
+[Deal "W:53.K6.QJT.AJT982 J8.A94.K9743.Q43 AK76.J8752.A82.K QT942.QT3.65.765"]
+
+[Dealer "W"]
+[Vulnerable "none"]
+[Deal "W:AKQT92.AQ6.A.Q92 6.J843.9874.8753 843.752.QJT3.KT6 J75.KT9.K652.AJ4"]
+
+[Dealer "S"]
+[Vulnerable "none"]
+[Deal "S:T72.J832.T96.KJT A.AQ4.AKQJ.Q7652 KQJ95.K75.842.94 8643.T96.753.A83"]
