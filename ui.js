@@ -169,11 +169,22 @@
       return;
     }
     if (Bridge.isUserTurn(game)) return;
-    timer = setTimeout(function () {
-      game = Bridge.playCard(game, Bridge.randomDefenderCard(game));
-      render();
-      advance();
-    }, DEFENDER_DELAY);
+    var thisGame = game;
+    Bridge.defendersReady.then(function () {
+      if (game !== thisGame || timer !== null) return;   // hand was left or restarted while DDS loaded
+      timer = setTimeout(function () {
+        var card;
+        try {
+          card = Bridge.chooseDefenderCard(game, game.toPlay, { lead: current && current.lead });
+        } catch (e) {
+          console.error(e);
+          card = Bridge.randomDefenderCard(game);
+        }
+        game = Bridge.playCard(game, card);
+        render();
+        advance();
+      }, DEFENDER_DELAY);
+    });
   }
 
   function onCardTap(card) {
@@ -476,7 +487,10 @@
     } else {
       text = SEAT_NAME[game.toPlay] + ' is playing\u2026';
     }
-    return el('div', 'status' + (go ? ' go' : ''), text);
+    var status = el('div', 'status' + (go ? ' go' : ''), text);
+    var note = Bridge.getDefenderNote();
+    if (note) { status.appendChild(el('div', 'defnote', note)); }
+    return status;
   }
 
   // ---- Result
@@ -599,6 +613,7 @@
         dealer: stored.dealer,
         vulnerability: stored.vulnerability,
         auction: stored.auction || [],
+        lead: stored.lead,
         contract: stored.contract,
         source: source
       };
@@ -787,8 +802,8 @@
 
   try {
     ['parsePBNDeal', 'sortHand', 'SEATS', 'SUITS', 'newGame', 'legalPlays', 'playCard', 'isFinished',
-      'getResult', 'isUserTurn', 'trickWinner', 'randomDefenderCard', 'dealId', 'getStore', 'buildSeedDeals', 'encodeShare', 'decodeShare', 'shareUrl','renderLibraryScreen', 'resetLibraryScreen', 'loadBundledLibrary', 'loadRemoteLibrary', 'addLibraryHands'].forEach(function (name) {
-      if (!Bridge || !Bridge[name]) throw new Error('Bridge.' + name + ' is missing: check that cards.js, rules.js, ai.js and storage.js load before ui.js');
+      'getResult', 'isUserTurn', 'trickWinner', 'randomDefenderCard', 'chooseDefenderCard', 'defendersReady', 'getDefenderNote', 'normaliseLead', 'dealId', 'getStore', 'buildSeedDeals', 'encodeShare', 'decodeShare', 'shareUrl','renderLibraryScreen', 'resetLibraryScreen', 'loadBundledLibrary', 'loadRemoteLibrary', 'addLibraryHands'].forEach(function (name) {
+      if (!Bridge || !Bridge[name]) throw new Error('Bridge.' + name + ' is missing: check that cards.js, rules.js, ai.js, defenders.js and storage.js load before ui.js');
     });
     store = Bridge.getStore();
     store.seedIfEmpty(Bridge.buildSeedDeals()); // first run only: the store is empty

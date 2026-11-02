@@ -31,7 +31,7 @@
       return Array.isArray(d.deal[seat]) && d.deal[seat].every(function (c) { return typeof c === 'string'; });
     });
     if (!stringsOnly) return 'every hand must be an array of card strings such as "SA"';
-    try { Bridge.dealId(d.deal, d.contract); } catch (e) { return e.message; }
+    try { Bridge.dealId(d.deal, d.contract, d.lead); } catch (e) { return e.message; }
     if (Bridge.SEATS.indexOf(d.contract.declarer) < 0) return 'the declarer must be N, E, S or W';
     if (Bridge.SEATS.indexOf(d.dealer) < 0) return 'the dealer must be N, E, S or W';
     var v = d.vulnerability;
@@ -159,7 +159,7 @@
     function saveDeal(stored) {
       var problem = checkStoredDeal(stored);
       if (problem) throw new Error('Cannot save deal: ' + problem);
-      var id = Bridge.dealId(stored.deal, stored.contract);
+      var id = Bridge.dealId(stored.deal, stored.contract, stored.lead);
       if (has(deals, id)) return { id: id, added: false };
       var hands = {};
       Bridge.SEATS.forEach(function (seat) { hands[seat] = Bridge.sortHand(stored.deal[seat]); });
@@ -175,7 +175,8 @@
           doubled: stored.contract.doubled,
           declarer: stored.contract.declarer
         },
-        source: stored.source
+        source: stored.source,
+        lead: Bridge.normaliseLead(stored.lead)
       });
       persist();
       return { id: id, added: true };
@@ -230,8 +231,45 @@
       return added;
     }
 
+    // Changes dealer, vulnerability and auction of a stored deal in place; the id, cards, contract, lead, source and play record stay.
+    function updateDealMeta(id, meta) {
+      if (!has(deals, id)) throw new Error('Cannot update deal: it is not in the library');
+      var old = deals[id];
+      meta = meta || {};
+      var candidate = {
+        deal: old.deal,
+        contract: old.contract,
+        lead: old.lead,
+        source: old.source,
+        dealer: meta.dealer !== undefined ? meta.dealer : old.dealer,
+        vulnerability: meta.vulnerability !== undefined ? meta.vulnerability : old.vulnerability,
+        auction: meta.auction !== undefined ? meta.auction : old.auction
+      };
+      var problem = checkStoredDeal(candidate);
+      if (problem) throw new Error('Cannot update deal: ' + problem);
+      try {
+        candidate.auction = candidate.auction.map(function (c) { return Bridge.normaliseCall(c); });
+        Bridge.checkAuction(candidate.auction, candidate.dealer, candidate.contract);
+      } catch (e) {
+        throw new Error('Cannot update deal: ' + e.message);
+      }
+      deals[id] = clone({
+        id: id,
+        deal: old.deal,
+        dealer: candidate.dealer,
+        vulnerability: { NS: candidate.vulnerability.NS, EW: candidate.vulnerability.EW },
+        auction: candidate.auction,
+        contract: old.contract,
+        source: old.source,
+        lead: old.lead
+      });
+      persist();
+      return { id: id, updated: true };
+    }
+
     return {
       saveDeal: saveDeal,
+      updateDealMeta: updateDealMeta,
       loadDeal: loadDeal,
       listDeals: listDeals,
       getRecord: getRecord,

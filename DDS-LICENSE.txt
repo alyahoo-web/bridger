@@ -1,0 +1,29 @@
+Third-party notice: DDS (Double Dummy Solver)
+=============================================
+
+dds.js is a WebAssembly build of DDS, the Double Dummy Solver for bridge, written by
+Bo Haglund and Soren Hein (https://github.com/dds-bridge/dds). It is used to choose the
+defenders' cards (see defenders.js).
+
+Licence: Apache License, Version 2.0 (to be confirmed against the DDS repository before
+release; see the ACTION ITEMS below).
+
+dds.js is generated with Emscripten (SINGLE_FILE=1), so it also contains the Emscripten
+runtime, which is available under the MIT licence and the University of Illinois/NCSA
+Open Source License (see https://github.com/emscripten-core/emscripten/blob/main/LICENSE).
+
+ACTION ITEMS (not done by the author of this file; I could not check them from here)
+-------------------------------------------------------------------------------------
+1. Open LICENSE (and any NOTICE file) in the DDS source tree you built from and confirm
+   the licence and the copyright lines. Correct the "Licence:" line above if it differs.
+2. Apache-2.0 requires a copy of the licence text with any redistribution. Paste the
+   complete text of the DDS LICENSE file below the line marked "FULL LICENCE TEXT".
+3. Check whether the top of dds.js still carries the DDS copyright/licence comment
+   (-O3 builds can drop comments). If not, this file is the notice that travels with it.
+4. If you changed any DDS source files before building (bestcards.cpp is your own
+   addition), Apache-2.0 asks you to state that changes were made: add a line here.
+5. Ship this file with the app (and list it in the Session G cache list only if you
+   want it available offline; it is not needed at run time).
+
+=========================== FULL LICENCE TEXT (paste here) ===========================
+

@@ -53,7 +53,7 @@
   var MAX_TEXT = 1000000;
   var MAX_TITLE = 80;
   var MAX_NOTE = 200;
-  var UNIQUE_TAGS = { dealer: 1, vulnerable: 1, deal: 1, auction: 1, contract: 1, declarer: 1 };
+  var UNIQUE_TAGS = { dealer: 1, vulnerable: 1, deal: 1, auction: 1, contract: 1, declarer: 1, lead: 1 };
 
   function has(obj, key) {
     return Object.prototype.hasOwnProperty.call(obj, key);

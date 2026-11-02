@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<!-- Browser tests (PASS/FAIL list) for deal-draft.js, the cards.js validator exports and store.updateDealMeta. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tests: deal-draft.js</title>
+<style>
+  body { font: 15px/1.4 -apple-system, system-ui, sans-serif; margin: 16px; }
+  #summary { font-weight: 700; margin-bottom: 12px; }
+  ul { list-style: none; padding: 0; margin: 0; }
+  li { padding: 3px 0; border-bottom: 1px solid #ddd; }
+  .pass::before { content: "PASS  "; color: #0a7a2f; font-weight: 700; }
+  .fail::before { content: "FAIL  "; color: #b00020; font-weight: 700; }
+  .detail { color: #b00020; display: block; margin-left: 3.2em; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>deal-draft.js tests</h1>
+<div id="summary">Running…</div>
+<ul id="results"></ul>
+
+<script src="cards.js"></script>
+<script src="storage.js"></script>
+<script src="deal-draft.js"></script>
+<script>
+(function () {
+  var B = window.Bridge;
+  var results = document.getElementById('results');
+  var passed = 0, failed = 0;
+
+  function test(name, fn) {
+    var li = document.createElement('li');
+    try {
+      fn();
+      li.className = 'pass';
+      li.textContent = name;
+      passed++;
+    } catch (e) {
+      li.className = 'fail';
+      li.textContent = name;
+      var d = document.createElement('span');
+      d.className = 'detail';
+      d.textContent = e.message;
+      li.appendChild(d);
+      failed++;
+    }
+    results.appendChild(li);
+  }
+  function assert(cond, msg) { if (!cond) throw new Error(msg || 'assertion failed'); }
+  function eq(a, b, msg) {
+    var x = JSON.stringify(a), y = JSON.stringify(b);
+    if (x !== y) throw new Error((msg ? msg + ': ' : '') + 'expected ' + y + ' but got ' + x);
+  }
+  function throws(fn, part, msg) {
+    try { fn(); } catch (e) {
+      if (part && e.message.indexOf(part) < 0) throw new Error((msg || 'wrong message') + ': ' + e.message);
+      return;
+    }
+    throw new Error((msg || 'expected an error') + ' (none thrown)');
+  }
+  // seeded generator so the tests are repeatable
+  function rng(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  function seedDeals() { return B.buildSeedDeals(); }
+  function sortedDeal(deal) {
+    var o = {};
+    B.SEATS.forEach(function (s) { o[s] = B.sortHand(deal[s]); });
+    return o;
+  }
+  function freshStore() { return B.createStore({ memory: true }); }
+
+  // ---------------------------------------------------------------- exports
+  test('cards.js exports the four validators', function () {
+    ['validateDeal', 'validateContract', 'normaliseCall', 'checkAuction'].forEach(function (n) {
+      assert(typeof B[n] === 'function', 'Bridge.' + n + ' missing');
+    });
+  });
+  test('suit order is S,H,D,C everywhere we use it', function () {
+    eq(B.SUITS.join(''), 'SHDC');
+  });
+
+  // ---------------------------------------------------------------- blank and random
+  test('blank draft: 52 unassigned, nothing saved, not valid', function () {
+    var d = B.draftBlank();
+    eq(B.draftCounts(d), { N: 0, E: 0, S: 0, W: 0, unassigned: 52 });
+    var r = B.draftToStored(d);
+    assert(!r.ok && r.errors.length >= 4, 'should list the four short hands');
+    assert(/North has 0 cards/.test(r.errors[0]), r.errors[0]);
+  });
+  test('random draft: 13 each and valid, source authored, no lead key', function () {
+    var d = B.draftRandom(rng(7));
+    eq(B.draftCounts(d), { N: 13, E: 13, S: 13, W: 13, unassigned: 0 });
+    var r = B.draftToStored(d);
+    assert(r.ok, r.ok ? '' : r.errors.join('; '));
+    eq(r.stored.source, 'authored');
+    assert(!('lead' in r.stored), 'lead key must be absent');
+    eq(r.stored.id, B.dealId(r.stored.deal, r.stored.contract));
+  });
+
+  // ---------------------------------------------------------------- cards
+  test('setCard assigns, moves and removes a card', function () {
+    var d = B.draftBlank();
+    assert(B.draftSetCard(d, 'SA', 'N').ok);
+    eq(B.draftCounts(d).N, 1);
+    assert(B.draftSetCard(d, 'SA', 'E').ok);
+    eq(B.draftCounts(d), { N: 0, E: 1, S: 0, W: 0, unassigned: 51 });
+    assert(B.draftSetCard(d, 'SA', null).ok);
+    eq(B.draftCounts(d).unassigned, 52);
+  });
+  test('a 14th card is refused and nothing changes', function () {
+    var d = B.draftBlank();
+    B.makeDeck().slice(0, 13).forEach(function (c) { assert(B.draftSetCard(d, c, 'N').ok); });
+    var r = B.draftSetCard(d, 'CA', 'N');
+    assert(!r.ok && /already has 13/.test(r.message), r.message);
+    eq(B.draftCounts(d).N, 13);
+    eq(d.owner.CA, null);
+  });
+  test('a full seat can still hold its own card (no-op)', function () {
+    var d = B.draftRandom(rng(1));
+    var c = B.draftHands(d).N[0];
+    assert(B.draftSetCard(d, c, 'N').ok);
+  });
+  test('setCard rejects a bad card or seat', function () {
+    var d = B.draftBlank();
+    assert(!B.draftSetCard(d, 'ZZ', 'N').ok);
+    assert(!B.draftSetCard(d, 'SA', 'Q').ok);
+  });
+  test('hands come back sorted S,H,D,C high to low', function () {
+    var d = B.draftBlank();
+    ['C2', 'SK', 'HA', 'S2', 'DT'].forEach(function (c) { B.draftSetCard(d, c, 'W'); });
+    eq(B.draftHands(d).W, ['SK', 'S2', 'HA', 'DT', 'C2']);
+  });
+
+  // ---------------------------------------------------------------- round trips through the model
+  test('random drafts survive draft -> stored -> draft -> stored (50 deals)', function () {
+    for (var i = 1; i <= 50; i++) {
+      var d = B.draftRandom(rng(i));
+      d.contract = { level: 1 + (i % 7), strain: ['C', 'D', 'H', 'S', 'NT'][i % 5], doubled: i % 3, declarer: B.SEATS[i % 4] };
+      var a = B.draftToStored(d);
+      assert(a.ok, a.ok ? '' : a.errors.join('; '));
+      var b = B.draftToStored(B.draftFromStored(a.stored));
+      assert(b.ok, b.ok ? '' : b.errors.join('; '));
+      eq(b.stored, a.stored, 'deal ' + i);
+    }
+  });
+  test('bundled seed deals round trip, auctions included', function () {
+    seedDeals().forEach(function (s, i) {
+      var r = B.draftToStored(B.draftFromStored(s));
+      assert(r.ok, 'seed ' + (i + 1) + ': ' + (r.ok ? '' : r.errors.join('; ')));
+      eq(r.stored.id, s.id, 'seed ' + (i + 1) + ' id');
+      eq(r.stored.auction, s.auction, 'seed ' + (i + 1) + ' auction');
+      eq(r.stored.dealer, s.dealer);
+      eq(r.stored.vulnerability, s.vulnerability);
+      eq(r.stored.contract, s.contract);
+      eq(r.stored.deal, sortedDeal(s.deal));
+    });
+  });
+  test('old data without a lead keeps working', function () {
+    var s = seedDeals()[0];
+    assert(!('lead' in s) || s.lead === undefined, 'seed unexpectedly has a lead');
+    var d = B.draftFromStored(s);
+    eq(d.lead, undefined);
+    var r = B.draftToStored(d);
+    assert(r.ok && !('lead' in r.stored));
+    eq(r.stored.id, s.id);
+  });
+  test('draftFromStored does not change the stored deal', function () {
+    var s = seedDeals()[1];
+    var before = JSON.stringify(s);
+    var d = B.draftFromStored(s);
+    B.draftSetCard(d, d.owner && B.draftHands(d).N[0], null);
+    eq(JSON.stringify(s), before);
+  });
+
+  // ---------------------------------------------------------------- lead
+  test('opening leader is declarer\'s left-hand opponent', function () {
+    var d = B.draftBlank();
+    [['S', 'W'], ['W', 'N'], ['N', 'E'], ['E', 'S']].forEach(function (p) {
+      B.draftSetContract(d, { declarer: p[0] });
+      eq(B.draftOpeningLeader(d), p[1]);
+    });
+  });
+  test('lead choices are exactly the leader\'s cards', function () {
+    var d = B.draftRandom(rng(3));
+    B.draftSetContract(d, { declarer: 'S' });
+    eq(B.draftLeadChoices(d), B.draftHands(d).W);
+    B.draftSetContract(d, { declarer: 'E' });
+    eq(B.draftLeadChoices(d), B.draftHands(d).S);
+  });
+  test('a valid lead is stored (and normalised from lower case)', function () {
+    var d = B.draftRandom(rng(3));
+    var card = B.draftLeadChoices(d)[0];
+    assert(B.draftSetLead(d, card.toLowerCase()).ok);
+    var r = B.draftToStored(d);
+    assert(r.ok, r.ok ? '' : r.errors.join('; '));
+    eq(r.stored.lead, card);
+  });
+  test('a lead outside the leader\'s hand is refused', function () {
+    var d = B.draftRandom(rng(3));
+    var other = B.draftHands(d).N[0];
+    var r = B.draftSetLead(d, other);
+    assert(!r.ok && /must be a card in West/.test(r.message), r.message);
+    eq(d.lead, undefined);
+  });
+  test('a non-card lead is refused', function () {
+    var d = B.draftRandom(rng(3));
+    assert(!B.draftSetLead(d, 'ZZ').ok);
+  });
+  test('null or blank clears the lead', function () {
+    var d = B.draftRandom(rng(3));
+    B.draftSetLead(d, B.draftLeadChoices(d)[0]);
+    assert(B.draftSetLead(d, null).ok);
+    eq(d.lead, undefined);
+  });
+  test('changing declarer clears a lead that is no longer valid, with a message', function () {
+    var d = B.draftRandom(rng(3));
+    B.draftSetLead(d, B.draftLeadChoices(d)[0]);
+    var r = B.draftSetContract(d, { declarer: 'W' });
+    assert(r.ok && /cleared/.test(r.message), r.message);
+    eq(d.lead, undefined);
+  });
+  test('moving the lead card to another seat clears it', function () {
+    var d = B.draftRandom(rng(3));
+    var c = B.draftLeadChoices(d)[0];
+    B.draftSetLead(d, c);
+    B.draftSetCard(d, c, null);
+    eq(d.lead, undefined);
+  });
+  test('same cards with and without a lead, or with different leads, have different ids', function () {
+    var d = B.draftRandom(rng(9));
+    var none = B.draftToStored(d).stored.id;
+    var ch = B.draftLeadChoices(d);
+    B.draftSetLead(d, ch[0]);
+    var l1 = B.draftToStored(d).stored.id;
+    B.draftSetLead(d, ch[1]);
+    var l2 = B.draftToStored(d).stored.id;
+    assert(none !== l1 && l1 !== l2 && none !== l2, 'ids should differ');
+  });
+  test('a draft rebuilt from a stored deal keeps its lead', function () {
+    var d = B.draftRandom(rng(11));
+    B.draftSetLead(d, B.draftLeadChoices(d)[2]);
+    var a = B.draftToStored(d).stored;
+    var b = B.draftToStored(B.draftFromStored(a)).stored;
+    eq(b, a);
+    eq(b.lead, a.lead);
+  });
+
+  // ---------------------------------------------------------------- contract
+  test('setContract refuses an invalid contract and leaves the draft alone', function () {
+    var d = B.draftBlank();
+    var r = B.draftSetContract(d, { level: 9 });
+    assert(!r.ok, 'level 9 should fail');
+    eq(d.contract.level, 3);
+    assert(!B.draftSetContract(d, { strain: 'X' }).ok);
+    assert(!B.draftSetContract(d, { doubled: 5 }).ok);
+    assert(!B.draftSetContract(d, { declarer: 'Z' }).ok);
+  });
+
+  // ---------------------------------------------------------------- auction
+  test('parseAuctionText: empty, spacing, Pass, lower case, commas', function () {
+    eq(B.parseAuctionText(''), []);
+    eq(B.parseAuctionText('   '), []);
+    eq(B.parseAuctionText('1S pass 3s P, 4S P P p'), ['1S', 'P', '3S', 'P', '4S', 'P', 'P', 'P']);
+    eq(B.parseAuctionText('1NT X XX P P P'), ['1NT', 'X', 'XX', 'P', 'P', 'P']);
+  });
+  test('parseAuctionText rejects a bad call with the call named', function () {
+    throws(function () { B.parseAuctionText('1S P 8S'); }, '8S');
+    throws(function () { B.parseAuctionText('hello'); }, 'hello');
+  });
+  test('an empty auction is accepted', function () {
+    var d = B.draftRandom(rng(2));
+    d.auctionText = '';
+    var r = B.draftToStored(d);
+    assert(r.ok); eq(r.stored.auction, []);
+  });
+  test('a matching auction is accepted', function () {
+    var d = B.draftRandom(rng(2));
+    d.dealer = 'S';
+    B.draftSetContract(d, { level: 4, strain: 'S', doubled: 0, declarer: 'S' });
+    d.auctionText = '1S P 3S P 4S P P P';
+    var r = B.draftToStored(d);
+    assert(r.ok, r.ok ? '' : r.errors.join('; '));
+    eq(r.stored.auction, ['1S', 'P', '3S', 'P', '4S', 'P', 'P', 'P']);
+  });
+  test('an auction that ends in a different contract is rejected', function () {
+    var d = B.draftRandom(rng(2));
+    d.dealer = 'S';
+    B.draftSetContract(d, { level: 4, strain: 'S', doubled: 0, declarer: 'S' });
+    d.auctionText = '1H P 3H P 4H P P P';
+    var r = B.draftToStored(d);
+    assert(!r.ok, 'should be rejected');
+  });
+  test('an incomplete auction is rejected', function () {
+    var d = B.draftRandom(rng(2));
+    d.dealer = 'S';
+    B.draftSetContract(d, { level: 4, strain: 'S', doubled: 0, declarer: 'S' });
+    d.auctionText = '1S P 3S P 4S P';
+    var r = B.draftToStored(d);
+    assert(!r.ok && /incomplete|three passes/.test(r.errors.join(' ')), r.ok ? 'accepted' : r.errors.join('; '));
+  });
+  test('an auction that starts with the wrong dealer is rejected (declarer would differ)', function () {
+    var d = B.draftRandom(rng(2));
+    d.dealer = 'W';                       // W opens 1S, E raises: E declares, not S
+    B.draftSetContract(d, { level: 4, strain: 'S', doubled: 0, declarer: 'S' });
+    d.auctionText = '1S P 3S P 4S P P P';
+    assert(!B.draftToStored(d).ok, 'should be rejected');
+  });
+  test('a bad auction word is reported, not thrown', function () {
+    var d = B.draftRandom(rng(2));
+    d.auctionText = '1S banana';
+    var r = B.draftToStored(d);
+    assert(!r.ok && /banana/.test(r.errors.join(' ')));
+  });
+  test('draftToStored never throws on junk input', function () {
+    var d = B.draftBlank();
+    d.dealer = 'Q'; d.contract = { level: 'x', strain: 1, doubled: 9, declarer: null };
+    d.lead = 42; d.auctionText = null;
+    var r = B.draftToStored(d);
+    assert(!r.ok && r.errors.length > 0);
+  });
+
+  // ---------------------------------------------------------------- save planning
+  function planDraft(seed) {
+    var d = B.draftRandom(rng(seed));
+    return d;
+  }
+  test('plan: new deal, then same deal again is "same" and saves nothing', function () {
+    var store = freshStore();
+    var a = B.draftToStored(planDraft(21)).stored;
+    eq(B.draftPlanSave(store, a).action, 'new');
+    var c1 = B.draftCommit(store, a);
+    eq(c1.outcome, 'added');
+    eq(B.draftPlanSave(store, a).action, 'same');
+    eq(B.draftCommit(store, a).outcome, 'unchanged');
+    eq(store.listDeals().length, 1);
+    eq(store.loadDeal(a.id).source, 'authored');
+  });
+  test('plan: only dealer/vulnerability/auction changed -> "meta"; blocked unless allowed', function () {
+    var store = freshStore();
+    var d = planDraft(22);
+    var a = B.draftToStored(d).stored;
+    B.draftCommit(store, a);
+    d.dealer = 'E'; d.vulnerability = { NS: true, EW: false };
+    var b = B.draftToStored(d).stored;
+    eq(b.id, a.id, 'id must not change');
+    eq(B.draftPlanSave(store, b).action, 'meta');
+    eq(B.draftCommit(store, b).outcome, 'blocked');
+    eq(store.loadDeal(a.id).dealer, 'S', 'blocked commit must not change anything');
+    eq(B.draftCommit(store, b, { updateMeta: true }).outcome, 'updated');
+    var after = store.loadDeal(a.id);
+    eq(after.dealer, 'E');
+    eq(after.vulnerability, { NS: true, EW: false });
+    eq(store.listDeals().length, 1);
+  });
+  test('meta update keeps the play record and the id, cards, contract, lead, source', function () {
+    var store = freshStore();
+    var d = planDraft(23);
+    B.draftSetLead(d, B.draftLeadChoices(d)[0]);
+    var a = B.draftToStored(d).stored;
+    B.draftCommit(store, a);
+    store.saveResult(a.id, { tricksTaken: 9, tricksNeeded: 9, made: true });
+    var before = store.loadDeal(a.id);
+    d.dealer = 'W'; d.vulnerability = { NS: true, EW: true };
+    var b = B.draftToStored(d).stored;
+    B.draftCommit(store, b, { updateMeta: true });
+    var after = store.loadDeal(a.id);
+    eq(after.deal, before.deal); eq(after.contract, before.contract);
+    eq(after.lead, before.lead); eq(after.source, before.source); eq(after.id, before.id);
+    eq(store.getRecord(a.id).attempts, 1);
+    eq(store.getStatus(a.id), 'made');
+  });
+  test('editing a card or the contract or the lead gives a new deal; the original and its record are untouched', function () {
+    var store = freshStore();
+    var d = planDraft(24);
+    var a = B.draftToStored(d).stored;
+    B.draftCommit(store, a);
+    store.saveResult(a.id, { tricksTaken: 7, tricksNeeded: 9, made: false });
+
+    // swap two cards between N and E
+    var n = B.draftHands(d).N[0], e = B.draftHands(d).E[0];
+    d.owner[n] = 'E'; d.owner[e] = 'N';
+    var b = B.draftToStored(d).stored;
+    assert(b.id !== a.id, 'swap should change the id');
+    eq(B.draftCommit(store, b).outcome, 'added');
+
+    // different contract
+    var d2 = B.draftFromStored(a);
+    B.draftSetContract(d2, { level: 4 });
+    var c = B.draftToStored(d2).stored;
+    assert(c.id !== a.id);
+    eq(B.draftCommit(store, c).outcome, 'added');
+
+    // different lead
+    var d3 = B.draftFromStored(a);
+    B.draftSetLead(d3, B.draftLeadChoices(d3)[0]);
+    var l = B.draftToStored(d3).stored;
+    assert(l.id !== a.id);
+    eq(B.draftCommit(store, l).outcome, 'added');
+
+    eq(store.listDeals().length, 4);
+    eq(store.getRecord(a.id).attempts, 1);
+    eq(store.getStatus(a.id), 'failed');
+    eq(store.getStatus(b.id), 'unplayed');
+    eq(store.loadDeal(l.id).lead, l.lead);
+  });
+
+  // ---------------------------------------------------------------- store.updateDealMeta
+  test('updateDealMeta: unknown id throws', function () {
+    throws(function () { freshStore().updateDealMeta('nope', { dealer: 'N' }); }, 'not in the library');
+  });
+  test('updateDealMeta: bad dealer, vulnerability or auction throws and changes nothing', function () {
+    var store = freshStore();
+    var a = B.draftToStored(planDraft(25)).stored;
+    B.draftCommit(store, a);
+    var before = JSON.stringify(store.loadDeal(a.id));
+    throws(function () { store.updateDealMeta(a.id, { dealer: 'Z' }); }, 'dealer');
+    throws(function () { store.updateDealMeta(a.id, { vulnerability: { NS: 1, EW: false } }); }, 'vulnerability');
+    throws(function () { store.updateDealMeta(a.id, { auction: ['1H', 'P', 'P', 'P'] }); }, 'auction');
+    eq(JSON.stringify(store.loadDeal(a.id)), before);
+  });
+  test('updateDealMeta: a good auction is stored and exportAll shows it', function () {
+    var store = freshStore();
+    var d = planDraft(26);
+    d.dealer = 'S';
+    B.draftSetContract(d, { level: 4, strain: 'S', doubled: 0, declarer: 'S' });
+    var a = B.draftToStored(d).stored;
+    B.draftCommit(store, a);
+    var r = store.updateDealMeta(a.id, { auction: ['1S', 'P', '3S', 'P', '4S', 'P', 'P', 'P'] });
+    eq(r, { id: a.id, updated: true });
+    var out = JSON.parse(store.exportAll());
+    eq(out.deals[0].auction.length, 8);
+  });
+  test('updateDealMeta: survives a reload from the same backend', function () {
+    var backend = B.memoryBackend();
+    var s1 = B.createStore({ backend: backend });
+    var a = B.draftToStored(planDraft(27)).stored;
+    B.draftCommit(s1, a);
+    s1.updateDealMeta(a.id, { dealer: 'N' });
+    var s2 = B.createStore({ backend: backend });
+    eq(s2.loadDeal(a.id).dealer, 'N');
+  });
+
+  document.getElementById('summary').textContent =
+    (failed === 0 ? 'ALL PASS: ' : 'FAILURES: ') + passed + ' passed, ' + failed + ' failed';
+  document.getElementById('summary').style.color = failed === 0 ? '#0a7a2f' : '#b00020';
+})();
+</script>
+</body>
+</html>

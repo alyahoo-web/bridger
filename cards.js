@@ -312,7 +312,7 @@
       declarer: firstToBid[last.side + last.strain]
     };
     if (derived.level !== contract.level || derived.strain !== contract.strain ||
-        derived.doubled !== contract.doubled || derived.declarer !== contract.declarer) {
+      derived.doubled !== contract.doubled || derived.declarer !== contract.declarer) {
       fail('The auction ends in ' + describeContract(derived) + ' but the contract is ' + describeContract(contract));
     }
   }
@@ -321,10 +321,11 @@
 
   // A stable id from the cards and the contract only (not dealer, vulnerability, auction or source).
   // The cards are written as a PBN deal starting at North, so the first seat used on import does not matter.
-  function dealId(deal, contract) {
+  function dealId(deal, contract, lead) {
     validateDeal(deal);
     validateContract(contract);
-    return formatPBNDeal(deal, 'N').replace(/ /g, '_') + '|' + contractToString(contract) + '|' + contract.declarer;
+    var l = normaliseLead(lead);
+    return formatPBNDeal(deal, 'N').replace(/ /g, '_') + '|' + contractToString(contract) + '|' + contract.declarer + (l ? '|' + l : '');
   }
 
   // ---------------------------------------------------------------- PBN record
@@ -332,10 +333,26 @@
   var TAG_LINE = /^\[\s*([A-Za-z0-9_]+)\s+"([^"]*)"\s*\]$/;
   var WANTED_TAGS = ['deal', 'dealer', 'vulnerable', 'auction', 'contract', 'declarer'];
 
+  // 'sa' -> 'SA'; undefined, null or blank text -> undefined; anything else that is not a card throws.
+  function normaliseLead(value) {
+    if (value === undefined || value === null) return undefined;
+    if (typeof value !== 'string') fail('The opening lead must be a card such as SA or H2');
+    var t = value.trim().toUpperCase();
+    if (t === '') return undefined;
+    if (!/^[SHDC][2-9TJQKA]$/.test(t)) fail('The opening lead "' + value.slice(0, 12) + '" is not a card such as SA or H2');
+    return t;
+  }
+
+  function parsePBNRecord(text) {
+    var rec = parsePBNRecordBase(text);
+    if (rec.lead === undefined) delete rec.lead;
+    return rec;
+  }
+
   // PBN text with Deal, Contract and Declarer tags (and optionally Dealer, Vulnerable, Auction) -> Stored deal.
   // Deal, Contract and Declarer are required; Dealer defaults to N and Vulnerable to None.
   // The returned object has no `source` (PBN cannot carry it); the caller adds it.
-  function parsePBNRecord(text) {
+  function parsePBNRecordBase(text) {
     if (typeof text !== 'string') fail('A PBN record must be a string');
     var lines = text.replace(/^\uFEFF/, '').split(/\r\n|\r|\n/);
     var tags = {};
@@ -351,7 +368,7 @@
         if (!m) fail('Malformed PBN tag line: ' + trimmed);
         var name = m[1].toLowerCase();
         inAuction = false;
-        if (WANTED_TAGS.indexOf(name) >= 0) {
+        if (WANTED_TAGS.indexOf(name) >= 0 || name === 'lead') {
           if (name in tags) {
             fail('The tag ' + m[1] + ' appears more than once; parsePBNRecord reads one deal at a time');
           }
@@ -384,6 +401,7 @@
 
     var dealer = tags.dealer === undefined ? 'N' : requireSeat(tags.dealer, 'Dealer');
     var vulnerability = tags.vulnerable === undefined ? { NS: false, EW: false } : vulnFromString(tags.vulnerable);
+    var lead = normaliseLead(tags.lead);
 
     if (auctionTokens.length > 0) {
       var caller = requireSeat(tags.auction, 'The Auction tag value (first caller)');
@@ -395,11 +413,12 @@
     checkAuction(auctionTokens, dealer, contract);
 
     return {
-      id: dealId(deal, contract),
+      id: dealId(deal, contract, lead),
       deal: deal,
       dealer: dealer,
       vulnerability: vulnerability,
       auction: auctionTokens,
+      lead: lead,
       contract: contract
     };
   }
@@ -429,6 +448,8 @@
     }
     lines.push('[Contract "' + contractToString(contract) + '"]');
     lines.push('[Declarer "' + contract.declarer + '"]');
+    var lead = normaliseLead(stored.lead);
+    if (lead) lines.push('[Lead "' + lead + '"]');
     return lines.join('\n') + '\n';
   }
 
@@ -448,4 +469,9 @@
   Bridge.parsePBNRecord = parsePBNRecord;
   Bridge.formatPBNRecord = formatPBNRecord;
   Bridge.dealId = dealId;
+  Bridge.normaliseLead = normaliseLead;
+  Bridge.validateDeal = validateDeal;           // throws unless 4 hands of 13, 52 distinct cards
+  Bridge.validateContract = validateContract;   // throws on a bad contract
+  Bridge.normaliseCall = normaliseCall;         // 'pass' -> 'P'; throws on a bad call
+  Bridge.checkAuction = checkAuction;           // (auction, dealer, contract); throws; [] is fine
 })();

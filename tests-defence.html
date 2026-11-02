@@ -1,0 +1,570 @@
+<!-- tests-defence.html: browser tests for defenders.js and the opening-lead feature; open this page in a browser and it runs them all. -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>defenders.js tests</title>
+<style>
+  body { font-family: -apple-system, Helvetica, Arial, sans-serif; margin: 16px; line-height: 1.4; }
+  #summary { font-size: 1.2em; font-weight: bold; padding: 8px 12px; border-radius: 6px; background: #eee; }
+  #summary.ok { background: #d8f5d8; color: #145214; }
+  #summary.bad { background: #fbd9d9; color: #7a1010; }
+  ul { list-style: none; padding: 0; }
+  li { padding: 4px 0; border-bottom: 1px solid #ddd; }
+  .tag { display: inline-block; min-width: 3.2em; font-weight: bold; }
+  li.pass .tag { color: #1a7a1a; }
+  li.fail .tag { color: #b00020; }
+  li.skip .tag { color: #777; }
+  li.skip { color: #555; }
+  .detail { display: block; margin: 2px 0 0 3.2em; color: #b00020; font-family: monospace; white-space: pre-wrap; }
+  li.skip .detail { color: #777; }
+</style>
+</head>
+<body>
+<h1>defenders.js tests</h1>
+<p>Tests marked SKIP need the real DDS: put <code>dds.js</code> next to this page. All other tests use a stand-in solver, so they run with or without it.</p>
+<div id="summary">Waiting for DDS to load…</div>
+<ul id="results"></ul>
+
+<script src="cards.js"></script>
+<script src="rules.js"></script>
+<script src="ai.js"></script>
+<script src="dds.js"></script>
+<script src="defenders.js"></script>
+<script src="share.js"></script>
+<script src="library.js"></script>
+<script>
+(function () {
+  var B = window.Bridge || {};
+  var summary = document.getElementById('summary');
+  var list = document.getElementById('results');
+
+  if (!B.parsePBNDeal || !B.newGame || !B.randomDefenderCard) {
+    summary.textContent = 'FAIL: cards.js, rules.js or ai.js did not load (window.Bridge is missing its helpers)';
+    summary.className = 'bad';
+    return;
+  }
+  if (!B.chooseDefenderCard || !B.defendersReady) {
+    summary.textContent = 'FAIL: defenders.js did not load (see the browser console for the reason)';
+    summary.className = 'bad';
+    return;
+  }
+
+  var tests = [];
+  var realDDS = false;
+  function test(name, fn, opts) { tests.push({ name: name, fn: fn, needsDDS: !!(opts && opts.dds) }); }
+
+  // ------------------------------------------------------------ assertion helpers
+
+  function assert(cond, msg) {
+    if (!cond) throw new Error(msg || 'assertion failed');
+  }
+
+  function eq(actual, expected, msg) {
+    var a = JSON.stringify(actual);
+    var e = JSON.stringify(expected);
+    if (a !== e) throw new Error((msg ? msg + ': ' : '') + 'expected ' + e + ' but got ' + a);
+  }
+
+  function throwsError(fn, pattern, label) {
+    var err = null;
+    try { fn(); } catch (e) { err = e; }
+    if (!err) throw new Error((label || 'the call') + ' should have thrown but did not');
+    if (!(err instanceof Error)) throw new Error((label || 'the call') + ' threw something that is not an Error: ' + err);
+    if (!err.message) throw new Error((label || 'the call') + ' threw an Error with no message');
+    if (pattern && !pattern.test(err.message)) {
+      throw new Error((label || 'the call') + ' threw ' + JSON.stringify(err.message) + ', which does not match ' + pattern);
+    }
+    return err;
+  }
+
+  function need(name) {
+    if (!B[name]) throw new Error('Bridge.' + name + ' is missing (did its script file load?)');
+  }
+
+  // ------------------------------------------------------------ fixtures
+
+  function contract(level, strain, declarer) {
+    return { level: level, strain: strain, doubled: 0, declarer: declarer };
+  }
+
+  function playAll(state, cards) {
+    cards.forEach(function (c) { state = B.playCard(state, c); });
+    return state;
+  }
+
+  var HANDS_C = 'N:AQ52.A72.K83.A94 K98.K953.A94.KT5 J43.Q84.QT62.Q83 T76.JT6.J75.J762';
+  // Deal C, 3NT by South, so West leads. N AQ52.A72.K83.A94  E K98.K953.A94.KT5  S J43.Q84.QT62.Q83  W T76.JT6.J75.J762
+  var DEAL_C = B.parsePBNDeal(HANDS_C);
+  // Deal V: each player holds one whole suit (N hearts, E spades, S diamonds, W clubs).
+  var DEAL_V = B.parsePBNDeal('N:-.AKQJT98765432.-.- AKQJT98765432.-.-.- -.-.AKQJT98765432.- -.-.-.AKQJT98765432');
+
+  function game(cards) {
+    return playAll(B.newGame(DEAL_C, contract(3, 'NT', 'S')), cards);
+  }
+
+  // Installs a stand-in solver that reports every listed card as optimal; returns a record of its calls.
+  function useStub(cards) {
+    var calls = { n: 0, last: null };
+    B.setDefenderEngine(function (hands, trump, leader, trick) {
+      calls.n++;
+      calls.last = { hands: hands, trump: trump, leader: leader, trick: trick };
+      return { rc: 0, nodes: 1, cards: cards.map(function (c) { return { c: c, t: 7, eq: 0 }; }) };
+    });
+    return calls;
+  }
+
+  function pickWith(cards, state, seat, options) {
+    useStub(cards);
+    return B.chooseDefenderCard(state, seat, options);
+  }
+
+  var BASE = '[Deal "' + HANDS_C + '"]\n[Contract "3NT"]\n[Declarer "S"]\n';
+
+  // ------------------------------------------------------------ real DDS (these run first; stand-ins replace it later)
+
+  test('real DDS: the engine reports dds', function () {
+    eq(B.defenderEngine(), 'dds');
+    eq(B.getDefenderNote(), '');
+  }, { dds: true });
+
+  test('real DDS: a hand of all-equivalent cards leads its lowest card', function () {
+    B.clearDefenderCache();
+    eq(B.chooseDefenderCard(B.newGame(DEAL_V, contract(1, 'NT', 'S')), 'W'), 'C2');
+  }, { dds: true });
+
+  test('real DDS: a defender with one whole suit plays its lowest card when discarding', function () {
+    B.clearDefenderCache();
+    var st = playAll(B.newGame(DEAL_V, contract(1, 'NT', 'S')), ['C2', 'H2']);
+    eq(st.toPlay, 'E');
+    eq(B.chooseDefenderCard(st, 'E'), 'S2');
+  }, { dds: true });
+
+  test('real DDS: the same position gives the same legal card three times', function () {
+    var st = game([]);
+    var first = null;
+    for (var i = 0; i < 3; i++) {
+      B.clearDefenderCache();
+      var c = B.chooseDefenderCard(st, 'W');
+      assert(B.legalPlays(st).indexOf(c) >= 0, c + ' is not a legal play');
+      if (first === null) first = c;
+      eq(c, first, 'call ' + (i + 1));
+    }
+  }, { dds: true });
+
+  // ------------------------------------------------------------ tie-break (stand-in solver)
+
+  test('tie-break: the same position gives the same card three times, whatever order the solver lists cards in', function () {
+    var st = game([]);
+    var orders = [['ST', 'D7', 'C6', 'H9'], ['H9', 'C6', 'ST', 'D7'], ['C6', 'D7', 'H9', 'ST']];
+    var seen = orders.map(function (o) {
+      useStub(o);
+      return B.chooseDefenderCard(st, 'W');
+    });
+    eq(seen, ['C6', 'C6', 'C6']);
+  });
+
+  test('tie-break: leads the lowest rank, whatever the suit', function () {
+    eq(pickWith(['ST', 'D7', 'C6'], game([]), 'W'), 'C6');
+  });
+
+  test('tie-break: equal ranks in different suits go to the fixed suit order S, H, D, C', function () {
+    eq(pickWith(['C7', 'D7', 'S7'], game([]), 'W'), 'S7');
+    eq(pickWith(['C7', 'D7'], game([]), 'W'), 'D7');
+  });
+
+  test('tie-break: of equivalent cards (touching ranks) the lowest is played', function () {
+    eq(pickWith(['HJ', 'HT'], game([]), 'W'), 'HT');
+  });
+
+  test('tie-break: cards with another card between them are not equivalent', function () {
+    eq(pickWith(['HJ', 'H6'], game([]), 'W'), 'H6');
+    eq(pickWith(['HJ', 'HT', 'H6'], game([]), 'W'), 'H6');
+  });
+
+  test('tie-break: second hand covers an honour with a higher honour', function () {
+    var st = game(['S6', 'SA', 'S8', 'S3', 'SQ']);   // North leads the queen of spades; East holds K and 9
+    eq(st.toPlay, 'E');
+    eq(pickWith(['SK', 'S9'], st, 'E'), 'SK');
+  });
+
+  test('tie-break: second hand plays low when a low card is led', function () {
+    var st = game(['S6', 'SA', 'S8', 'S3', 'S5']);
+    eq(pickWith(['SK', 'S9'], st, 'E'), 'S9');
+  });
+
+  test('tie-break: covering happens only among the optimal cards', function () {
+    var st = game(['S6', 'SA', 'S8', 'S3', 'SQ']);
+    eq(pickWith(['S9'], st, 'E'), 'S9');
+  });
+
+  test('tie-break: third hand plays high', function () {
+    var st = game(['S6', 'S2']);                     // West led, North played low, East is third
+    eq(st.toPlay, 'E');
+    eq(pickWith(['SK', 'S9', 'S8'], st, 'E'), 'SK');
+  });
+
+  test('tie-break: third hand high collapses equivalent cards first (9 and 8 are equivalent)', function () {
+    var st = game(['S6', 'S2']);
+    eq(pickWith(['S9', 'S8'], st, 'E'), 'S8');
+  });
+
+  test('tie-break: cards the solver lists that are not legal are ignored', function () {
+    var st = game(['S6', 'S2']);
+    eq(pickWith(['SK', 'H3'], st, 'E'), 'SK');
+  });
+
+  // ------------------------------------------------------------ how the solver is called
+
+  test('solver call: opening position, hands text, trump, leader and trick', function () {
+    var calls = useStub(['C6']);
+    B.chooseDefenderCard(game([]), 'W');
+    eq(calls.n, 1);
+    eq(calls.last.hands, 'AQ52.A72.K83.A94 K98.K953.A94.KT5 J43.Q84.QT62.Q83 T76.JT6.J75.J762');
+    eq(calls.last.trump, 4);
+    eq(calls.last.leader, 3);
+    eq(calls.last.trick, '');
+  });
+
+  test('solver call: cards already in the current trick are left out of the hands', function () {
+    var calls = useStub(['S8']);
+    B.chooseDefenderCard(game(['S6', 'S2']), 'E');
+    eq(calls.last.hands, 'AQ5.A72.K83.A94 K98.K953.A94.KT5 J43.Q84.QT62.Q83 T7.JT6.J75.J762');
+    eq(calls.last.leader, 3);
+    eq(calls.last.trick, 'S6 S2');
+  });
+
+  test('solver call: trump numbers are S0 H1 D2 C3 NT4, and the leader is left of declarer', function () {
+    var want = { S: 0, H: 1, D: 2, C: 3, NT: 4 };
+    Object.keys(want).forEach(function (strain) {
+      var calls = useStub(['C6']);
+      B.chooseDefenderCard(B.newGame(DEAL_C, contract(4, strain, 'S')), 'W');
+      eq(calls.last.trump, want[strain], strain);
+    });
+    var calls2 = useStub(['C2', 'C5', 'C9', 'CK']);
+    var st = B.newGame(DEAL_C, contract(1, 'NT', 'N'));
+    eq(st.toPlay, 'E');
+    B.chooseDefenderCard(st, 'E');
+    eq(calls2.last.leader, 1);
+  });
+
+  test('solver call: a trick led by North reaches the solver as a leader and one card', function () {
+    var calls = useStub(['S9']);
+    B.chooseDefenderCard(game(['S6', 'SA', 'S8', 'S3', 'SQ']), 'E');
+    eq(calls.last.leader, 0);
+    eq(calls.last.trick, 'SQ');
+  });
+
+  // ------------------------------------------------------------ cache
+
+  test('cache: a repeated position does not call the solver again; a new position does', function () {
+    var calls = useStub(['S9', 'S8']);
+    var st = game(['S6', 'S2']);
+    var a = B.chooseDefenderCard(st, 'E');
+    var b = B.chooseDefenderCard(st, 'E');
+    eq(a, b);
+    eq(calls.n, 1, 'solver calls after two identical requests');
+    B.chooseDefenderCard(game([]), 'W');
+    eq(calls.n, 2, 'solver calls after a different position');
+  });
+
+  test('cache: clearDefenderCache forces a fresh solve', function () {
+    var calls = useStub(['S9', 'S8']);
+    var st = game(['S6', 'S2']);
+    B.chooseDefenderCard(st, 'E');
+    B.clearDefenderCache();
+    B.chooseDefenderCard(st, 'E');
+    eq(calls.n, 2);
+  });
+
+  // ------------------------------------------------------------ declarer and dummy
+
+  test('declarer and dummy are never auto-played', function () {
+    useStub(['S2']);
+    throwsError(function () { B.chooseDefenderCard(game(['S6']), 'N'); }, /dummy/, 'dummy to play');
+    throwsError(function () { B.chooseDefenderCard(game(['S6', 'S2', 'S8']), 'S'); }, /declarer/, 'declarer to play');
+  });
+
+  test('asking for a seat that is not to play is an error', function () {
+    useStub(['C6']);
+    throwsError(function () { B.chooseDefenderCard(game([]), 'E'); }, /not E/, 'wrong seat');
+  });
+
+  // ------------------------------------------------------------ opening-lead override
+
+  test('lead override: a lead in the opening leader\'s hand is played and the solver is not called', function () {
+    var calls = useStub(['C6']);
+    eq(B.chooseDefenderCard(game([]), 'W', { lead: 'ST' }), 'ST');
+    eq(calls.n, 0);
+    eq(B.getDefenderNote(), '');
+  });
+
+  test('lead override: lower-case and padded text is accepted', function () {
+    useStub(['C6']);
+    eq(B.chooseDefenderCard(game([]), 'W', { lead: ' st ' }), 'ST');
+  });
+
+  test('lead override: a lead not in the leader\'s hand is ignored with a warning, and the solver chooses', function () {
+    var calls = useStub(['C6']);
+    eq(B.chooseDefenderCard(game([]), 'W', { lead: 'SA' }), 'C6');
+    eq(calls.n, 1);
+    assert(/SA is not in West's hand/.test(B.getDefenderNote()), 'note was ' + JSON.stringify(B.getDefenderNote()));
+  });
+
+  test('lead override: text that is not a card is ignored with a warning', function () {
+    useStub(['C6']);
+    eq(B.chooseDefenderCard(game([]), 'W', { lead: 'XX' }), 'C6');
+    assert(/not a valid card/.test(B.getDefenderNote()), 'note was ' + JSON.stringify(B.getDefenderNote()));
+  });
+
+  test('lead override: the warning clears when a later opening has a good lead or none', function () {
+    useStub(['C6']);
+    B.chooseDefenderCard(game([]), 'W', { lead: 'SA' });
+    assert(B.getDefenderNote() !== '', 'expected a warning first');
+    B.chooseDefenderCard(game([]), 'W', { lead: 'ST' });
+    eq(B.getDefenderNote(), '');
+    B.chooseDefenderCard(game([]), 'W', { lead: 'SA' });
+    B.clearDefenderCache();
+    B.chooseDefenderCard(game([]), 'W');
+    eq(B.getDefenderNote(), '');
+  });
+
+  test('lead override: only the opening lead is overridden', function () {
+    var calls = useStub(['S8']);
+    eq(B.chooseDefenderCard(game(['S6', 'S2']), 'E', { lead: 'SK' }), 'S8');
+    eq(calls.n, 1);
+  });
+
+  test('lead override: no lead gives no note', function () {
+    useStub(['C6']);
+    eq(B.chooseDefenderCard(game([]), 'W', {}), 'C6');
+    eq(B.getDefenderNote(), '');
+  });
+
+  test('checkLead: results for absent, good, wrong-hand and malformed leads', function () {
+    var st = game([]);
+    var c = st.contract;
+    eq(B.checkLead(st.deal, c, undefined).present, false);
+    eq(B.checkLead(st.deal, c, '').present, false);
+    var ok = B.checkLead(st.deal, c, 'st');
+    eq([ok.present, ok.ok, ok.card], [true, true, 'ST']);
+    var wrong = B.checkLead(st.deal, c, 'SA');
+    eq([wrong.present, wrong.ok, wrong.card], [true, false, null]);
+    assert(wrong.reason.length > 0, 'a reason is expected');
+    var bad = B.checkLead(st.deal, c, 'ZZ');
+    eq([bad.present, bad.ok], [true, false]);
+  });
+
+  // ------------------------------------------------------------ fallback
+
+  test('fallback: with DDS missing the defenders play random legal cards and a note is set', function () {
+    B.setDefenderEngine(null);
+    eq(B.defenderEngine(), 'random');
+    assert(/unavailable/.test(B.getDefenderNote()), 'note was ' + JSON.stringify(B.getDefenderNote()));
+    var st = game([]);
+    for (var i = 0; i < 20; i++) {
+      assert(B.legalPlays(st).indexOf(B.chooseDefenderCard(st, 'W')) >= 0, 'call ' + i + ' was not legal');
+    }
+  });
+
+  test('fallback: a pre-specified lead still works with DDS missing', function () {
+    B.setDefenderEngine(null);
+    eq(B.chooseDefenderCard(game([]), 'W', { lead: 'ST' }), 'ST');
+  });
+
+  test('fallback: a solver that throws gives a legal random card and sets the note', function () {
+    B.setDefenderEngine(function () { throw new Error('boom'); });
+    var st = game([]);
+    assert(B.legalPlays(st).indexOf(B.chooseDefenderCard(st, 'W')) >= 0, 'not legal');
+    assert(/unavailable/.test(B.getDefenderNote()), 'note was ' + JSON.stringify(B.getDefenderNote()));
+  });
+
+  test('fallback: an error result from the solver gives a legal random card', function () {
+    B.setDefenderEngine(function () { return { rc: -1, err: 'bad input' }; });
+    var st = game([]);
+    assert(B.legalPlays(st).indexOf(B.chooseDefenderCard(st, 'W')) >= 0, 'not legal');
+  });
+
+  test('fallback: a solver that only names illegal cards gives a legal random card', function () {
+    var st = game(['S6', 'S2']);
+    B.setDefenderEngine(function () { return { rc: 0, nodes: 1, cards: [{ c: 'H3', t: 5, eq: 0 }] }; });
+    assert(B.legalPlays(st).indexOf(B.chooseDefenderCard(st, 'E')) >= 0, 'not legal');
+  });
+
+  // ------------------------------------------------------------ lead in the deal id and normaliseLead
+
+  test('normaliseLead: tidies a card, treats blank as none, rejects anything else', function () {
+    need('normaliseLead');
+    eq(B.normaliseLead('sa'), 'SA');
+    eq(B.normaliseLead(' h2 '), 'H2');
+    eq(B.normaliseLead(''), undefined);
+    eq(B.normaliseLead(undefined), undefined);
+    throwsError(function () { B.normaliseLead('XX'); }, /opening lead/, 'XX');
+    throwsError(function () { B.normaliseLead('S1'); }, /opening lead/, 'S1');
+  });
+
+  test('dealId: no lead keeps the old id; a lead, and each different lead, give different ids', function () {
+    var c = contract(3, 'NT', 'S');
+    var none = B.dealId(DEAL_C, c);
+    eq(none.split('|').length, 3, 'old id has three parts');
+    var sa = B.dealId(DEAL_C, c, 'SA');
+    var sk = B.dealId(DEAL_C, c, 'SK');
+    eq(sa, none + '|SA');
+    assert(none !== sa && sa !== sk && none !== sk, 'ids should all differ');
+    eq(B.dealId(DEAL_C, c, 'sa'), sa, 'lower case is normalised');
+    eq(B.dealId(DEAL_C, c, ''), none, 'a blank lead is no lead');
+  });
+
+  // ------------------------------------------------------------ PBN round trips
+
+  test('PBN: a record without a Lead tag has no lead and keeps the old id', function () {
+    var s = B.parsePBNRecord(BASE);
+    assert(!('lead' in s), 'no lead property expected');
+    eq(s.id, B.dealId(DEAL_C, contract(3, 'NT', 'S')));
+    assert(B.formatPBNRecord(s).indexOf('[Lead') < 0, 'export should not write a Lead tag');
+  });
+
+  test('PBN: [Lead "SA"] is read, tidied, and part of the id', function () {
+    var s = B.parsePBNRecord(BASE + '[Lead "sa"]\n');
+    eq(s.lead, 'SA');
+    eq(s.id, B.parsePBNRecord(BASE).id + '|SA');
+    assert(s.id !== B.parsePBNRecord(BASE + '[Lead "SK"]\n').id, 'a different lead is a different deal');
+  });
+
+  test('PBN: export writes [Lead "SA"] and importing it again gives the same deal', function () {
+    var s = B.parsePBNRecord(BASE + '[Lead "SA"]\n');
+    var text = B.formatPBNRecord(s);
+    assert(text.indexOf('[Lead "SA"]') >= 0, 'export is missing the Lead tag:\n' + text);
+    eq(B.parsePBNRecord(text), s);
+  });
+
+  test('PBN: a record without a lead survives export and import unchanged', function () {
+    var s = B.parsePBNRecord(BASE);
+    eq(B.parsePBNRecord(B.formatPBNRecord(s)), s);
+  });
+
+  test('PBN: a Lead that is not a card is refused with a clear message', function () {
+    throwsError(function () { B.parsePBNRecord(BASE + '[Lead "XX"]\n'); }, /opening lead/, 'Lead XX');
+  });
+
+  test('PBN: a repeated Lead tag is refused', function () {
+    throwsError(function () { B.parsePBNRecord(BASE + '[Lead "SA"]\n[Lead "SK"]\n'); }, /more than once/, 'two Lead tags');
+  });
+
+  test('PBN: an empty Lead tag counts as no lead', function () {
+    var s = B.parsePBNRecord(BASE + '[Lead ""]\n');
+    assert(!('lead' in s), 'no lead property expected');
+  });
+
+  // ------------------------------------------------------------ share string round trips
+
+  test('share: a deal with a lead gets a seventh field and decodes back to the same deal', function () {
+    need('encodeShare'); need('decodeShare');
+    var s = B.parsePBNRecord(BASE + '[Lead "SA"]\n');
+    var code = B.encodeShare(s);
+    eq(code.split(':').length, 7);
+    eq(code.split(':')[6], 'SA');
+    var d = B.decodeShare(code);
+    eq(d.lead, 'SA');
+    eq(d.id, s.id);
+  });
+
+  test('share: a deal without a lead keeps the six-field string and decodes with no lead', function () {
+    need('encodeShare'); need('decodeShare');
+    var s = B.parsePBNRecord(BASE);
+    var code = B.encodeShare(s);
+    eq(code.split(':').length, 6);
+    var d = B.decodeShare(code);
+    assert(!('lead' in d), 'no lead property expected');
+    eq(d.id, s.id);
+  });
+
+  test('share: an old-style six-field string written by hand still decodes', function () {
+    need('decodeShare');
+    var old = 'BP1:AQ52.A72.K83.A94,K98.K953.A94.KT5,J43.Q84.QT62.Q83,T76.JT6.J75.J762:3NT:S:N:-';
+    var d = B.decodeShare(old);
+    assert(!('lead' in d), 'no lead property expected');
+    eq(d.id, B.dealId(DEAL_C, contract(3, 'NT', 'S')));
+  });
+
+  test('share: a bad seventh field is refused with a clear message', function () {
+    need('decodeShare');
+    var old = 'BP1:AQ52.A72.K83.A94,K98.K953.A94.KT5,J43.Q84.QT62.Q83,T76.JT6.J75.J762:3NT:S:N:-';
+    throwsError(function () { B.decodeShare(old + ':XX'); }, /opening lead/, 'lead XX');
+    throwsError(function () { B.decodeShare(old + ':SA:SA'); }, /damaged/, 'eight fields');
+  });
+
+  // ------------------------------------------------------------ library import
+
+  test('library: Lead tags are read, and the same cards with and without a lead are different deals', function () {
+    need('importPBN');
+    var text = BASE + '\n' + BASE + '[Lead "SA"]\n\n' + BASE + '[Lead "SA"]\n';
+    var r = B.importPBN(text);
+    eq(r.total, 3);
+    eq(r.results.map(function (x) { return x.status; }), ['ok', 'ok', 'duplicate']);
+    eq(r.results[1].stored.lead, 'SA');
+    assert(!('lead' in r.results[0].stored), 'first deal has no lead');
+  });
+
+  // ------------------------------------------------------------ run and report
+
+  function run() {
+    var passed = 0;
+    var failed = 0;
+    var skipped = 0;
+    tests.forEach(function (t) {
+      var li = document.createElement('li');
+      var tag = document.createElement('span');
+      tag.className = 'tag';
+      var label = document.createElement('span');
+      label.textContent = t.name;
+      if (t.needsDDS && !realDDS) {
+        skipped++;
+        li.className = 'skip';
+        tag.textContent = 'SKIP';
+        li.appendChild(tag);
+        li.appendChild(label);
+        var why = document.createElement('span');
+        why.className = 'detail';
+        why.textContent = 'the real DDS is not loaded (is dds.js next to this page?)';
+        li.appendChild(why);
+        list.appendChild(li);
+        return;
+      }
+      try {
+        t.fn();
+        passed++;
+        li.className = 'pass';
+        tag.textContent = 'PASS';
+        li.appendChild(tag);
+        li.appendChild(label);
+      } catch (e) {
+        failed++;
+        li.className = 'fail';
+        tag.textContent = 'FAIL';
+        li.appendChild(tag);
+        li.appendChild(label);
+        var detail = document.createElement('span');
+        detail.className = 'detail';
+        detail.textContent = (e && e.message) ? e.message : String(e);
+        li.appendChild(detail);
+      }
+      list.appendChild(li);
+    });
+
+    var ran = tests.length - skipped;
+    summary.textContent = (failed === 0 ? 'PASS' : 'FAIL') + ': ' + passed + ' of ' + ran + ' tests passed' +
+      (failed ? ', ' + failed + ' failed' : '') + (skipped ? ' (' + skipped + ' skipped: real DDS not loaded)' : '');
+    summary.className = failed === 0 ? 'ok' : 'bad';
+    document.title = (failed === 0 ? 'PASS' : 'FAIL') + ' ' + passed + '/' + ran + ' - defenders.js tests';
+  }
+
+  B.defendersReady.then(function (kind) {
+    realDDS = kind === 'dds';
+    run();
+  });
+})();
+</script>
+</body>
+</html>

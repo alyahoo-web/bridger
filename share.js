@@ -81,6 +81,8 @@
   function encodeShare(stored) {
     if (!stored || typeof stored !== 'object') throw new Error('Cannot share: no deal was given.');
     var c = checkContract(stored.contract);
+    var lead;
+    try { lead = Bridge.normaliseLead(stored.lead); } catch (e) { throw new Error('Cannot share: ' + e.message); }
     if (!isSeat(stored.dealer)) throw new Error('Cannot share: the dealer is not valid.');
     var v = stored.vulnerability;
     if (!v || typeof v.NS !== 'boolean' || typeof v.EW !== 'boolean') {
@@ -95,7 +97,7 @@
     var hands = pbn.replace(/^N:/, '').split(' ');
     var contractText = c.level + c.strain + ['', 'X', 'XX'][c.doubled];
     return [VERSION, hands.join(','), contractText, c.declarer, stored.dealer,
-            VUL_CODES[(v.NS ? 1 : 0) + (v.EW ? 2 : 0)]].join(':');
+    VUL_CODES[(v.NS ? 1 : 0) + (v.EW ? 2 : 0)]].concat(lead ? [lead] : []).join(':');
   }
 
   // Pull the bare code out of whatever was pasted or found in the URL hash.
@@ -120,6 +122,12 @@
   }
 
   function decodeShare(input) {
+    var d = decodeShareBase(input);
+    if (d.lead === undefined) delete d.lead;
+    return d;
+  }
+
+  function decodeShareBase(input) {
     var code = extractCode(input);
     var parts = code.split(':');
 
@@ -130,7 +138,7 @@
       throw new Error('This shared deal is version ' + parts[0].slice(2) +
                       ', which this version of the app cannot read.');
     }
-    if (parts.length !== 6) {
+    if (parts.length !== 6 && parts.length !== 7) {
       throw new Error('The shared deal is damaged: expected 6 parts but found ' + parts.length + '.');
     }
 
@@ -170,6 +178,13 @@
       throw new Error('The vulnerability "' + shown(parts[5]) + '" is not valid. Use -, NS, EW or ALL.');
     }
 
+    var lead;
+    if (parts.length === 7) {
+      lead = parts[6];
+      if (!/^[SHDC][2-9TJQKA]$/.test(lead)) {
+        throw new Error('The opening lead "' + shown(lead) + '" is not valid. Use a card such as SA or H2.');
+      }
+    }
     var contract = {
       level: parseInt(m[1], 10),
       strain: m[2],
@@ -178,7 +193,7 @@
     };
     var id;
     try {
-      id = Bridge.dealId(deal, contract);
+      id = Bridge.dealId(deal, contract, lead);
     } catch (e) {
       throw new Error('The shared deal could not be checked: ' + e.message);
     }
@@ -188,6 +203,7 @@
       dealer: parts[4],
       vulnerability: { NS: vulIndex === 1 || vulIndex === 3, EW: vulIndex === 2 || vulIndex === 3 },
       auction: [],
+      lead: lead,
       contract: contract
     };
   }
