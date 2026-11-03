@@ -101,15 +101,15 @@
     render();
   }
 
-   function openLibrary() {
-     clearTimeout(timer);
-     Bridge.resetLibraryScreen();
-     screen = 'library';
-     render();
-   }
-   function renderLibrary() {
-     return Bridge.renderLibraryScreen({ store: store, onBack: goHome });
-   }
+  function openLibrary() {
+    clearTimeout(timer);
+    Bridge.resetLibraryScreen();
+    screen = 'library';
+    render();
+  }
+  function renderLibrary() {
+    return Bridge.renderLibraryScreen({ store: store, onBack: goHome });
+  }
 
   function onHomeTap() {
     if (handInProgress()) {
@@ -276,6 +276,15 @@
   }
 
   function renderRow(r) {
+    var wrap = el('div', 'rowwrap');
+    wrap.appendChild(renderRowButton(r));
+    var tools = el('div', 'rowtools');
+    tools.appendChild(button('', 'Edit', function () { openEditor('edit', r.deal); }));
+    tools.appendChild(button('', 'Share / export', function () { Bridge.openDealExport(r.deal); }));
+    wrap.appendChild(tools);
+    return wrap;
+  }
+  function renderRowButton(r) {
     var c = r.deal.contract;
     var row = button('dealrow', '', function () { openDeal(r.deal.id); });
 
@@ -537,7 +546,7 @@
 
   var SD_LEVELS = [[1, '1'], [2, '2'], [3, '3'], [4, '4'], [5, '5'], [6, '6'], [7, '7']];
   var SD_STRAINS = [['C', '\u2663 Clubs'], ['D', '\u2666 Diamonds'], ['H', '\u2665 Hearts'],
-                    ['S', '\u2660 Spades'], ['NT', 'No trump']];
+  ['S', '\u2660 Spades'], ['NT', 'No trump']];
   var SD_DOUBLES = [[0, 'Not doubled'], [1, 'Doubled (X)'], [2, 'Redoubled (XX)']];
   var SD_SEATS = [['N', 'North'], ['E', 'East'], ['S', 'South'], ['W', 'West']];
   var sdDialog = null;   // the open overlay element, or null
@@ -705,6 +714,9 @@
   }
 
   function onShareTap() {
+    Bridge.openDealExport(current);
+  }
+  function onShareTapOld() {
     var code, url;
     try {
       code = Bridge.encodeShare(current);
@@ -740,16 +752,55 @@
 
   // ---- Home: "New random deal" button and the paste box ----
 
+  function openEditor(mode, stored) {
+    Bridge.openDealEditor({
+      store: store, mode: mode, stored: stored,
+      onSaved: function (id, outcome, info) {
+        homeMessage = outcome === 'added'
+          ? (info.mode === 'edit' ? 'Saved as a new deal. The original is unchanged.' : 'Deal saved to the library.')
+          : (outcome === 'updated' ? 'Deal updated.' : 'That deal was already in the library, unchanged.');
+        goHome();
+      }
+    });
+  }
+
+  // Reads pasted text. Returns a stored deal to play, or null (after showing an error, or the "several deals" dialog).
+  function openPasted(text, err) {
+    var r;
+    try { r = Bridge.readDealText(text); } catch (e) { err.textContent = e.message; return null; }
+    if (r.kind === 'deal') return r.stored;
+    var box = sdOpenDialog('Several deals found');
+    box.appendChild(sdEl('p', 'sd-note', 'That text holds ' + r.count + ' deals (' + r.okCount + ' readable'
+      + (r.duplicateCount ? ', ' + r.duplicateCount + ' repeated' : '')
+      + (r.errorCount ? ', ' + r.errorCount + ' unreadable' : '') + '). Add them all to the library?'));
+    var actions = sdEl('div', 'sd-actions');
+    actions.appendChild(sdButton('Add all', 'sd-btn sd-primary', function () {
+      sdCloseDialog();
+      try {
+        var res = Bridge.addManyFromText(store, text);
+        homeMessage = 'Added ' + res.added + ' deal' + (res.added === 1 ? '' : 's') + ' to the library'
+          + (res.already ? ' (' + res.already + ' already there)' : '')
+          + (res.unreadable ? ', ' + res.unreadable + ' could not be read' : '') + '.';
+        goHome();
+      } catch (e) { err.textContent = e.message; }
+    }));
+    actions.appendChild(sdButton('Cancel', 'sd-btn', function () { sdCloseDialog(); }));
+    box.appendChild(actions);
+    return null;
+  }
+
   function appendDealTools(parent) {
     var sec = sdEl('section', 'sd-tools');
     sec.appendChild(sdButton('New random deal', 'sd-btn sd-primary', onNewRandomDeal));
+    sec.appendChild(sdButton('Create a deal (random start)', 'sd-btn', function () { openEditor('random'); }));
+    sec.appendChild(sdButton('Create a deal (blank)', 'sd-btn', function () { openEditor('blank'); }));
 
     var lab = sdEl('label', 'sd-label', 'Open a shared hand');
     lab.setAttribute('for', 'sd-paste');
     var paste = sdEl('textarea', 'sd-field');
     paste.id = 'sd-paste';
     paste.rows = 3;
-    paste.placeholder = 'Paste a shared code or link here';
+    paste.placeholder = 'Paste a shared code, link, PBN or JSON here';
     paste.setAttribute('spellcheck', 'false');
     paste.setAttribute('autocapitalize', 'off');
     paste.setAttribute('autocorrect', 'off');
@@ -760,7 +811,7 @@
       err.textContent = '';
       var shared;
       try {
-        shared = Bridge.decodeShare(paste.value);
+        shared = openPasted(paste.value, err);
       } catch (e) {
         err.textContent = e.message;
         return;
@@ -798,13 +849,13 @@
     sdStart(shared, 'shared');
   }
   // ===== end Session E ========================================================
-// start
+  // start
 
   try {
-    ['parsePBNDeal', 'sortHand', 'SEATS', 'SUITS', 'newGame', 'legalPlays', 'playCard', 'isFinished',
-      'getResult', 'isUserTurn', 'trickWinner', 'randomDefenderCard', 'chooseDefenderCard', 'defendersReady', 'getDefenderNote', 'normaliseLead', 'dealId', 'getStore', 'buildSeedDeals', 'encodeShare', 'decodeShare', 'shareUrl','renderLibraryScreen', 'resetLibraryScreen', 'loadBundledLibrary', 'loadRemoteLibrary', 'addLibraryHands'].forEach(function (name) {
-      if (!Bridge || !Bridge[name]) throw new Error('Bridge.' + name + ' is missing: check that cards.js, rules.js, ai.js, defenders.js and storage.js load before ui.js');
-    });
+    ['parsePBNDeal', 'sortHand', 'SEATS', 'SUITS', 'openDealEditor', 'openDealExport', 'readDealText', 'addManyFromText', 'newGame', 'legalPlays', 'playCard', 'isFinished',
+      'getResult', 'isUserTurn', 'trickWinner', 'randomDefenderCard', 'chooseDefenderCard', 'defendersReady', 'getDefenderNote', 'normaliseLead', 'dealId', 'getStore', 'buildSeedDeals', 'encodeShare', 'decodeShare', 'shareUrl', 'renderLibraryScreen', 'resetLibraryScreen', 'loadBundledLibrary', 'loadRemoteLibrary', 'addLibraryHands'].forEach(function (name) {
+        if (!Bridge || !Bridge[name]) throw new Error('Bridge.' + name + ' is missing: check that cards.js, rules.js, ai.js, defenders.js and storage.js load before ui.js');
+      });
     store = Bridge.getStore();
     store.seedIfEmpty(Bridge.buildSeedDeals()); // first run only: the store is empty
     render();

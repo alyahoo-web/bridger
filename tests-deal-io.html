@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<!-- Browser tests (PASS/FAIL list) for deal-io.js: export and import round trips in all four formats, plus rejection of bad input. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tests: deal-io.js</title>
+<style>
+  body { font: 15px/1.4 -apple-system, system-ui, sans-serif; margin: 16px; }
+  #summary { font-weight: 700; margin-bottom: 12px; }
+  ul { list-style: none; padding: 0; margin: 0; }
+  li { padding: 3px 0; border-bottom: 1px solid #ddd; }
+  .pass::before { content: "PASS  "; color: #0a7a2f; font-weight: 700; }
+  .fail::before { content: "FAIL  "; color: #b00020; font-weight: 700; }
+  .detail { color: #b00020; display: block; margin-left: 3.2em; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>deal-io.js tests</h1>
+<div id="summary">Running…</div>
+<ul id="results"></ul>
+
+<script src="cards.js"></script>
+<script src="storage.js"></script>
+<script src="share.js"></script>
+<script src="library.js"></script>
+<script src="deal-draft.js"></script>
+<script src="deal-io.js"></script>
+<script>
+(function () {
+  var B = window.Bridge;
+  var results = document.getElementById('results');
+  var passed = 0, failed = 0;
+
+  function test(name, fn) {
+    var li = document.createElement('li');
+    try {
+      fn();
+      li.className = 'pass';
+      li.textContent = name;
+      passed++;
+    } catch (e) {
+      li.className = 'fail';
+      li.textContent = name;
+      var d = document.createElement('span');
+      d.className = 'detail';
+      d.textContent = e.message;
+      li.appendChild(d);
+      failed++;
+    }
+    results.appendChild(li);
+  }
+  function assert(cond, msg) { if (!cond) throw new Error(msg || 'assertion failed'); }
+  function eq(a, b, msg) {
+    var x = JSON.stringify(a), y = JSON.stringify(b);
+    if (x !== y) throw new Error((msg ? msg + ': ' : '') + 'expected ' + y + ' but got ' + x);
+  }
+  function throws(fn, part, msg) {
+    try { fn(); } catch (e) {
+      if (part && e.message.toLowerCase().indexOf(part.toLowerCase()) < 0) throw new Error((msg || 'wrong message') + ': ' + e.message);
+      return;
+    }
+    throw new Error((msg || 'expected an error') + ' (none thrown)');
+  }
+  function rng(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  function sortedDeal(deal) {
+    var o = {};
+    B.SEATS.forEach(function (s) { o[s] = B.sortHand(deal[s]); });
+    return o;
+  }
+  // The parts of a deal that must survive a round trip. The share code and link do not carry the auction.
+  function core(s, withAuction) {
+    var o = {
+      id: s.id,
+      deal: sortedDeal(s.deal),
+      dealer: s.dealer,
+      vulnerability: { NS: !!s.vulnerability.NS, EW: !!s.vulnerability.EW },
+      contract: { level: s.contract.level, strain: s.contract.strain, doubled: s.contract.doubled || 0, declarer: s.contract.declarer },
+      lead: s.lead || null
+    };
+    if (withAuction) o.auction = s.auction || [];
+    return o;
+  }
+  function freshStore() { return B.createStore({ memory: true }); }
+  function exp(stored, format) { return B.exportDealText(stored, format, 'https://example.com/app/index.html').text; }
+  function imp(text) {
+    var r = B.readDealText(text);
+    assert(r.kind === 'deal', 'expected a single deal, got ' + r.kind);
+    return r;
+  }
+
+  function auctionFor(c) {
+    var a = [c.level + c.strain];
+    if (c.doubled >= 1) a.push('X');
+    if (c.doubled === 2) a.push('XX');
+    return a.concat(['P', 'P', 'P']);
+  }
+  // n varied valid deals: all strains, doubled states, declarers, vulnerabilities; every second has an auction; every third has a lead.
+  function makeDeals(n) {
+    var out = [];
+    for (var i = 1; i <= n; i++) {
+      var d = B.draftRandom(rng(100 + i));
+      var contract = { level: 1 + (i % 7), strain: ['C', 'D', 'H', 'S', 'NT'][i % 5], doubled: i % 3, declarer: B.SEATS[(i * 3) % 4] };
+      assert(B.draftSetContract(d, contract).ok, 'contract ' + i);
+      d.vulnerability = { NS: i % 2 === 0, EW: i % 3 === 0 };
+      if (i % 2 === 1) { d.dealer = contract.declarer; d.auctionText = auctionFor(contract).join(' '); }
+      else { d.dealer = B.SEATS[i % 4]; d.auctionText = ''; }
+      if (i % 3 === 0) assert(B.draftSetLead(d, B.draftLeadChoices(d)[i % 13]).ok, 'lead ' + i);
+      var r = B.draftToStored(d);
+      assert(r.ok, 'deal ' + i + ': ' + (r.ok ? '' : r.errors.join('; ')));
+      out.push(r.stored);
+    }
+    return out;
+  }
+  var DEALS = makeDeals(60);
+  var SEEDS = B.buildSeedDeals();
+  var KNOWN_CODE = 'BP1:AK42.A53.K63.874,976.T86.T872.QT9,Q53.KQ4.AQ4.A652,JT8.J972.J95.KJ3:3NT:S:S:-';
+
+  // ---------------------------------------------------------------- basics
+  test('formats are code, link, json, pbn', function () {
+    eq(B.DEAL_FORMATS.slice(), ['code', 'link', 'json', 'pbn']);
+  });
+  test('test data has a spread: some leads, some auctions, some doubled', function () {
+    assert(DEALS.some(function (s) { return s.lead; }), 'no leads');
+    assert(DEALS.some(function (s) { return !s.lead; }), 'all leads');
+    assert(DEALS.some(function (s) { return s.auction.length; }), 'no auctions');
+    assert(DEALS.some(function (s) { return s.contract.doubled === 2; }), 'no redoubles');
+  });
+
+  // ---------------------------------------------------------------- round trips, every format
+  B.DEAL_FORMATS.forEach(function (format) {
+    var withAuction = format === 'json' || format === 'pbn';
+    test('round trip ' + format + ': ' + DEALS.length + ' deals come back identical, lead included' + (withAuction ? ', auction included' : ' (auction is not carried)'), function () {
+      DEALS.forEach(function (s, i) {
+        var back = imp(exp(s, format));
+        eq(back.format, format === 'code' || format === 'link' || format === 'json' || format === 'pbn' ? format : '', 'format detected, deal ' + i);
+        eq(core(back.stored, withAuction), core(s, withAuction), 'deal ' + i);
+        assert(back.stored.source === undefined, 'source should be left for the caller, deal ' + i);
+      });
+    });
+    test('round trip ' + format + ': bundled seed deals (no lead, old data) come back identical', function () {
+      SEEDS.forEach(function (s, i) {
+        var back = imp(exp(s, format));
+        eq(core(back.stored, withAuction), core(s, withAuction), 'seed ' + (i + 1));
+        assert(!back.stored.lead, 'a lead appeared from nowhere, seed ' + (i + 1));
+      });
+    });
+    test('round trip ' + format + ': a deal read back saves under the same id', function () {
+      var store = freshStore();
+      var s = DEALS[5];
+      store.saveDeal(s);
+      var back = imp(exp(store.loadDeal(s.id), format)).stored;
+      back.source = 'shared';
+      eq(store.saveDeal(back), { id: s.id, added: false });
+      eq(store.listDeals().length, 1);
+    });
+  });
+
+  test('a lead is part of the identity: same cards with and without a lead differ after a round trip in every format', function () {
+    var d = B.draftRandom(rng(55));
+    var plain = B.draftToStored(d).stored;
+    B.draftSetLead(d, B.draftLeadChoices(d)[0]);
+    var led = B.draftToStored(d).stored;
+    assert(plain.id !== led.id);
+    B.DEAL_FORMATS.forEach(function (f) {
+      var a = imp(exp(plain, f)).stored, b = imp(exp(led, f)).stored;
+      eq(a.id, plain.id, f + ' plain'); eq(b.id, led.id, f + ' led');
+      assert(!a.lead && b.lead === led.lead, f + ' lead');
+    });
+  });
+
+  // ---------------------------------------------------------------- format details
+  test('code: 6 fields without a lead, 7 with the lead last', function () {
+    var plain = DEALS.filter(function (s) { return !s.lead; })[0];
+    var led = DEALS.filter(function (s) { return s.lead; })[0];
+    eq(exp(plain, 'code').split(':').length, 6);
+    var parts = exp(led, 'code').split(':');
+    eq(parts.length, 7);
+    eq(parts[6], led.lead);
+    assert(/^BP1:/.test(exp(led, 'code')));
+  });
+  test('an old six-field code still opens', function () {
+    var r = imp(KNOWN_CODE);
+    eq(r.format, 'code');
+    eq(r.stored.contract, { level: 3, strain: 'NT', doubled: 0, declarer: 'S' });
+    eq(r.stored.dealer, 'S');
+    assert(!r.stored.lead);
+  });
+  test('link: uses the given base, replaces an old hash, and has one #', function () {
+    var s = DEALS[0];
+    var u = B.exportDealText(s, 'link', 'https://example.com/app/index.html#old').text;
+    assert(u.indexOf('https://example.com/app/index.html#BP1:') === 0, u);
+    eq(u.split('#').length, 2);
+    var f = B.exportDealText(s, 'link', 'file:///Users/me/bridge/index.html').text;
+    assert(f.indexOf('file:///Users/me/bridge/index.html#') === 0, f);
+    eq(imp(f).format, 'link');
+    eq(imp(f).stored.id, s.id);
+  });
+  test('link: a link with surrounding spaces and line breaks still opens', function () {
+    var s = DEALS[1];
+    var r = imp('  \n' + exp(s, 'link') + ' \n');
+    eq(r.stored.id, s.id);
+  });
+  test('json: same shape and key order as an entry of the library export', function () {
+    var store = freshStore();
+    DEALS.slice(0, 12).forEach(function (s) { store.saveDeal(s); });
+    var entries = JSON.parse(store.exportAll()).deals;
+    entries.forEach(function (entry, i) {
+      var mine = JSON.parse(exp(store.loadDeal(entry.id), 'json'));
+      eq(JSON.stringify(mine), JSON.stringify(entry), 'entry ' + i);
+    });
+  });
+  test('json: no lead key when there is no lead; lead present when there is', function () {
+    var plain = DEALS.filter(function (s) { return !s.lead; })[0];
+    var led = DEALS.filter(function (s) { return s.lead; })[0];
+    assert(!('lead' in JSON.parse(exp(plain, 'json'))));
+    eq(JSON.parse(exp(led, 'json')).lead, led.lead);
+  });
+  test('pbn: contains the Lead tag only when there is a lead', function () {
+    var plain = DEALS.filter(function (s) { return !s.lead; })[0];
+    var led = DEALS.filter(function (s) { return s.lead; })[0];
+    assert(!/\[Lead /.test(exp(plain, 'pbn')));
+    assert(exp(led, 'pbn').indexOf('[Lead "' + led.lead + '"]') >= 0, exp(led, 'pbn'));
+  });
+  test('pbn: a lower-case lead tag is accepted and normalised', function () {
+    var s = DEALS.filter(function (x) { return !x.lead; })[0];
+    var leader = B.SEATS[(B.SEATS.indexOf(s.contract.declarer) + 1) % 4];
+    var card = B.sortHand(s.deal[leader])[0];
+    var r = imp(exp(s, 'pbn') + '[Lead "' + card.toLowerCase() + '"]\n');
+    eq(r.stored.lead, card);
+  });
+  test('pbn: a lead not in the opening leader\'s hand still imports (it is only ignored at play time)', function () {
+    var s = DEALS.filter(function (x) { return !x.lead; })[0];
+    var leader = B.SEATS[(B.SEATS.indexOf(s.contract.declarer) + 1) % 4];
+    var other = B.sortHand(s.deal[s.contract.declarer])[0];
+    var r = imp(exp(s, 'pbn') + '[Lead "' + other + '"]\n');
+    eq(r.stored.lead, other);
+    assert(leader !== s.contract.declarer);
+  });
+  test('pbn: a bad or repeated lead tag is rejected', function () {
+    var s = DEALS.filter(function (x) { return !x.lead; })[0];
+    throws(function () { B.readDealText(exp(s, 'pbn') + '[Lead "ZZ"]\n'); }, '', 'bad lead');
+    throws(function () { B.readDealText(exp(s, 'pbn') + '[Lead "SA"]\n[Lead "SK"]\n'); }, '', 'two leads');
+  });
+  test('pbn: comments and blank lines around one record are fine', function () {
+    var s = DEALS[2];
+    var r = imp('% exported by hand\n\n' + exp(s, 'pbn') + '\n\n');
+    eq(r.stored.id, s.id);
+  });
+  test('file names: right extension, contract and declarer in the name, safe characters', function () {
+    var ext = { code: '.txt', link: '.txt', json: '.json', pbn: '.pbn' };
+    DEALS.slice(0, 20).forEach(function (s) {
+      B.DEAL_FORMATS.forEach(function (f) {
+        var e = B.exportDealText(s, f, 'https://example.com/');
+        assert(/^[A-Za-z0-9._\-]+$/.test(e.filename), e.filename);
+        assert(e.filename.slice(-ext[f].length) === ext[f], e.filename);
+        assert(e.filename.indexOf(s.contract.level + s.contract.strain) >= 0, e.filename);
+        assert(typeof e.mime === 'string' && e.mime.length > 0);
+        eq(e.format, f);
+      });
+    });
+    assert(B.exportDealText(DEALS[0], 'json').filename !== B.exportDealText(DEALS[1], 'json').filename, 'names should differ');
+  });
+  test('exporting does not change the stored deal', function () {
+    var s = DEALS.filter(function (x) { return x.lead; })[0];
+    var before = JSON.stringify(s);
+    B.DEAL_FORMATS.forEach(function (f) { exp(s, f); });
+    eq(JSON.stringify(s), before);
+  });
+  test('export of an unknown format or an invalid deal throws "Cannot export"', function () {
+    throws(function () { B.exportDealText(DEALS[0], 'xml'); }, 'Cannot export');
+    throws(function () { B.exportDealText(null, 'json'); }, 'Cannot export');
+    var bad = JSON.parse(JSON.stringify(DEALS[0]));
+    bad.deal.N.pop();
+    throws(function () { B.exportDealText(bad, 'pbn'); }, 'Cannot export');
+  });
+
+  // ---------------------------------------------------------------- reading JSON
+  function json(s) { return JSON.parse(exp(s, 'json')); }
+  test('json: the id and source in the text are ignored (the id is recomputed)', function () {
+    var s = DEALS[4];
+    var j = json(s);
+    j.id = 'forged'; j.source = 'library';
+    var r = imp(JSON.stringify(j));
+    eq(r.stored.id, s.id);
+    assert(r.stored.source === undefined);
+  });
+  test('json: dealer, vulnerability and auction are optional', function () {
+    var j = json(DEALS[4]);
+    delete j.dealer; delete j.vulnerability; delete j.auction;
+    var r = imp(JSON.stringify(j));
+    eq(r.stored.dealer, 'N');
+    eq(r.stored.vulnerability, { NS: false, EW: false });
+    eq(r.stored.auction, []);
+  });
+  test('json: lower-case lead and calls are normalised', function () {
+    var s = DEALS.filter(function (x) { return x.auction.length && x.lead; })[0] || DEALS.filter(function (x) { return x.auction.length; })[0];
+    var j = json(s);
+    j.auction = j.auction.map(function (c) { return c === 'P' ? 'pass' : c.toLowerCase(); });
+    if (j.lead) j.lead = j.lead.toLowerCase();
+    var r = imp(JSON.stringify(j));
+    eq(core(r.stored, true), core(s, true));
+  });
+  test('json: rejects bad text with a message', function () {
+    throws(function () { B.readDealText('{not json'); }, 'not valid JSON');
+    throws(function () { B.dealFromJSON('[1,2]'); }, 'list');
+    throws(function () { B.dealFromJSON('"hello"'); }, 'object');
+    throws(function () { B.dealFromJSON('{}'); }, 'no "deal"');
+    var j = json(DEALS[0]); delete j.contract;
+    throws(function () { B.dealFromJSON(JSON.stringify(j)); }, 'no "contract"');
+  });
+  test('json: rejects a whole-library export (for now)', function () {
+    var store = freshStore(); store.saveDeal(DEALS[0]);
+    throws(function () { B.readDealText(store.exportAll()); }, 'whole-library');
+  });
+  test('json: rejects a hand with 14 cards, a duplicate card, a bad contract, a bad lead, a bad dealer, a bad auction', function () {
+    var base = json(DEALS[0]);
+    function variant(fn) { var j = JSON.parse(JSON.stringify(base)); fn(j); return JSON.stringify(j); }
+    throws(function () { B.dealFromJSON(variant(function (j) { j.deal.N.push(j.deal.E[0]); })); }, 'not a valid deal');
+    throws(function () { B.dealFromJSON(variant(function (j) { j.deal.N[0] = j.deal.E[0]; })); }, 'not a valid deal');
+    throws(function () { B.dealFromJSON(variant(function (j) { j.deal.N = 'AKQ'; })); }, 'list of card strings');
+    throws(function () { B.dealFromJSON(variant(function (j) { j.contract.doubled = 3; })); }, 'not a valid deal');
+    throws(function () { B.dealFromJSON(variant(function (j) { j.contract.level = 8; })); }, 'not a valid deal');
+    throws(function () { B.dealFromJSON(variant(function (j) { j.lead = 'ZZ'; })); }, 'not a valid deal');
+    throws(function () { B.dealFromJSON(variant(function (j) { j.dealer = 'X'; })); }, 'not a valid deal');
+    throws(function () { B.dealFromJSON(variant(function (j) { j.vulnerability = { NS: 'yes', EW: false }; })); }, 'not a valid deal');
+    throws(function () { B.dealFromJSON(variant(function (j) { j.auction = ['1S', 'banana']; })); }, 'not a valid deal');
+    throws(function () { B.dealFromJSON(variant(function (j) { j.auction = ['1S', 'P', 'P']; })); }, 'not a valid deal');
+  });
+  test('json: an auction that disagrees with the contract is rejected', function () {
+    var s = DEALS.filter(function (x) { return x.auction.length; })[0];
+    var j = json(s);
+    j.contract.strain = j.contract.strain === 'S' ? 'H' : 'S';
+    throws(function () { B.dealFromJSON(JSON.stringify(j)); }, 'not a valid deal');
+  });
+
+  // ---------------------------------------------------------------- reading other text
+  test('rejects empty, junk and broken codes with a message', function () {
+    ['', '   ', '\n', 'hello world', 'BP1:bad', 'BP1:', '[1,2,3]'].forEach(function (t) {
+      throws(function () { B.readDealText(t); }, '', JSON.stringify(t));
+    });
+    throws(function () { B.readDealText(null); }, 'Nothing to open');
+    throws(function () { B.readDealText(42); }, 'Nothing to open');
+  });
+  test('rejects PBN text with no deal in it', function () {
+    throws(function () { B.readDealText('[Event "Club night"]\n[Site "Home"]\n'); }, '');
+  });
+  test('rejects a single PBN record that is broken', function () {
+    throws(function () { B.readDealText('[Dealer "N"]\n[Deal "N:garbage"]\n[Contract "3NT"]\n[Declarer "S"]\n'); }, '');
+  });
+
+  // ---------------------------------------------------------------- several PBN deals
+  function pbnOf(list) { return list.map(function (s) { return exp(s, 'pbn'); }).join('\n'); }
+  test('several PBN deals are reported as "many", not opened', function () {
+    var r = B.readDealText(pbnOf(DEALS.slice(0, 3)));
+    eq(r.kind, 'many');
+    eq(r.count, 3); eq(r.okCount, 3); eq(r.errorCount, 0); eq(r.duplicateCount, 0);
+  });
+  test('two copies of the same deal count as many, one duplicate', function () {
+    var r = B.readDealText(pbnOf([DEALS[0], DEALS[0]]));
+    eq(r.kind, 'many'); eq(r.count, 2); eq(r.duplicateCount, 1);
+  });
+  test('many where nothing can be read is an error', function () {
+    var bad = '[Dealer "N"]\n[Deal "N:garbage"]\n[Contract "3NT"]\n[Declarer "S"]\n';
+    throws(function () { B.readDealText(bad + '\n' + bad.replace('3NT', '4NT')); }, 'None of the');
+  });
+  test('addManyFromText adds every deal with source "shared", then reports them as already there', function () {
+    var store = freshStore();
+    var text = pbnOf(DEALS.slice(0, 4));
+    var r = B.addManyFromText(store, text);
+    eq(r.added, 4, 'added'); eq(r.total, 4); eq(r.unreadable, 0);
+    eq(store.listDeals().length, 4);
+    store.listDeals().forEach(function (d) { eq(d.source, 'shared', 'source of ' + d.id); });
+    DEALS.slice(0, 4).forEach(function (s) {
+      var got = store.loadDeal(s.id);
+      assert(got, 'deal missing');
+      eq(core(got, true), core(s, true));
+    });
+    var again = B.addManyFromText(store, text);
+    eq(again.added, 0, 'second run adds nothing');
+    eq(again.already, 4, 'second run: already');
+    eq(store.listDeals().length, 4);
+  });
+  test('addManyFromText keeps leads', function () {
+    var store = freshStore();
+    var withLead = DEALS.filter(function (s) { return s.lead; }).slice(0, 3);
+    assert(withLead.length === 3, 'need three deals with leads');
+    B.addManyFromText(store, pbnOf(withLead));
+    withLead.forEach(function (s) { eq(store.loadDeal(s.id).lead, s.lead); });
+  });
+  test('addManyFromText skips an unreadable record and reports it', function () {
+    var store = freshStore();
+    var bad = '[Dealer "N"]\n[Deal "N:garbage"]\n[Contract "3NT"]\n[Declarer "S"]\n';
+    var r = B.addManyFromText(store, exp(DEALS[0], 'pbn') + '\n' + bad + '\n' + exp(DEALS[1], 'pbn'));
+    eq(r.added, 2); eq(r.unreadable, 1); eq(r.total, 3);
+    eq(r.errors.length, 1);
+    eq(store.listDeals().length, 2);
+  });
+  test('addManyFromText does not touch existing deals or their source', function () {
+    var store = freshStore();
+    var mine = JSON.parse(JSON.stringify(DEALS[0])); mine.source = 'authored';
+    store.saveDeal(mine);
+    B.addManyFromText(store, pbnOf(DEALS.slice(0, 2)));
+    eq(store.loadDeal(DEALS[0].id).source, 'authored');
+    eq(store.loadDeal(DEALS[1].id).source, 'shared');
+  });
+  test('addManyFromText throws on non-text', function () {
+    throws(function () { B.addManyFromText(freshStore(), null); }, 'Nothing to add');
+  });
+
+  document.getElementById('summary').textContent =
+    (failed === 0 ? 'ALL PASS: ' : 'FAILURES: ') + passed + ' passed, ' + failed + ' failed';
+  document.getElementById('summary').style.color = failed === 0 ? '#0a7a2f' : '#b00020';
+})();
+</script>
+</body>
+</html>

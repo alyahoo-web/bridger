@@ -470,8 +470,8 @@
   Bridge.formatPBNRecord = formatPBNRecord;
   Bridge.dealId = dealId;
   Bridge.normaliseLead = normaliseLead;
-  Bridge.validateDeal = validateDeal;           // throws unless 4 hands of 13, 52 distinct cards
-  Bridge.validateContract = validateContract;   // throws on a bad contract
-  Bridge.normaliseCall = normaliseCall;         // 'pass' -> 'P'; throws on a bad call
-  Bridge.checkAuction = checkAuction;           // (auction, dealer, contract); throws; [] is fine
+  Bridge.validateDeal = validateDeal;
+  Bridge.validateContract = validateContract;
+  Bridge.normaliseCall = normaliseCall;
+  Bridge.checkAuction = checkAuction;
 })();

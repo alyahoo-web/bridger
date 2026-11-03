@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<!-- Browser tests (PASS/FAIL list) for deal-export-ui.js: the export dialog, copy with fallback, download and the share sheet, using stubs. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tests: deal-export-ui.js</title>
+<style>
+  body { font: 15px/1.4 -apple-system, system-ui, sans-serif; margin: 16px; }
+  #summary { font-weight: 700; margin-bottom: 12px; }
+  ul { list-style: none; padding: 0; margin: 0; }
+  li { padding: 3px 0; border-bottom: 1px solid #ddd; }
+  .pass::before { content: "PASS  "; color: #0a7a2f; font-weight: 700; }
+  .fail::before { content: "FAIL  "; color: #b00020; font-weight: 700; }
+  .detail { color: #b00020; display: block; margin-left: 3.2em; white-space: pre-wrap; }
+  .sd-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.3); overflow: auto; }
+  .sd-dialog { background: #fff; margin: 20px auto; padding: 12px; max-width: 480px; }
+</style>
+</head>
+<body>
+<h1>deal-export-ui.js tests</h1>
+<div id="summary">Running…</div>
+<ul id="results"></ul>
+
+<script src="cards.js"></script>
+<script src="storage.js"></script>
+<script src="share.js"></script>
+<script src="library.js"></script>
+<script src="deal-draft.js"></script>
+<script src="deal-io.js"></script>
+<script src="deal-export-ui.js"></script>
+<script>
+(function () {
+  var B = window.Bridge;
+  var results = document.getElementById('results');
+  var queue = [];
+  var BASE = 'https://example.com/app/index.html';
+
+  function test(name, fn) { queue.push({ name: name, fn: fn }); }
+  function assert(cond, msg) { if (!cond) throw new Error(msg || 'assertion failed'); }
+  function eq(a, b, msg) {
+    var x = JSON.stringify(a), y = JSON.stringify(b);
+    if (x !== y) throw new Error((msg ? msg + ': ' : '') + 'expected ' + y + ' but got ' + x);
+  }
+  function tick() { return new Promise(function (r) { setTimeout(r, 0); }); }
+
+  // ---------------------------------------------------------------- stubs, undone after every test
+  var navStubs = [];
+  var saved = {};
+  function stubNav(name, value) {
+    Object.defineProperty(navigator, name, { value: value, configurable: true });
+    navStubs.push(name);
+  }
+  function stubOnce(obj, key, value, label) {
+    if (!(label in saved)) saved[label] = { obj: obj, key: key, value: obj[key] };
+    obj[key] = value;
+  }
+  function restore() {
+    navStubs.forEach(function (n) { try { delete navigator[n]; } catch (e) { /* ignore */ } });
+    navStubs = [];
+    Object.keys(saved).forEach(function (l) { saved[l].obj[saved[l].key] = saved[l].value; });
+    saved = {};
+    B.dealUi.closeAll();
+  }
+
+  // ---------------------------------------------------------------- helpers
+  function rng(seed) {
+    var s = seed >>> 0;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  function makeStored(withLead, withAuction) {
+    var d = B.draftRandom(rng(31));
+    var contract = { level: 4, strain: 'S', doubled: 0, declarer: 'S' };
+    B.draftSetContract(d, contract);
+    d.dealer = 'S';
+    if (withAuction) d.auctionText = '4S P P P';
+    if (withLead) B.draftSetLead(d, B.draftLeadChoices(d)[0]);
+    var r = B.draftToStored(d);
+    assert(r.ok, r.ok ? '' : r.errors.join('; '));
+    r.stored.source = 'library';
+    return r.stored;
+  }
+  function overlays() { return document.querySelectorAll('.sd-overlay'); }
+  function dialog() { return document.querySelector('.sd-overlay .sd-dialog'); }
+  function find(label) {
+    var bs = dialog().querySelectorAll('button');
+    for (var i = 0; i < bs.length; i++) if (bs[i].textContent === label) return bs[i];
+    return null;
+  }
+  function field() { return dialog().querySelector('textarea'); }
+  function status() { return dialog().querySelector('[role="status"]'); }
+  function fmt(stored, f) { return B.exportDealText(stored, f, BASE).text; }
+  function open(stored) { return B.openDealExport(stored, { baseUrl: BASE }); }
+
+  // Catches the click on the temporary download link so the test does not really download anything.
+  function captureDownloads() {
+    var seen = [];
+    function onClick(e) {
+      var t = e.target;
+      if (t && t.tagName === 'A' && t.hasAttribute('download')) {
+        seen.push({ name: t.getAttribute('download'), href: t.getAttribute('href') });
+        e.preventDefault();
+      }
+    }
+    document.addEventListener('click', onClick, true);
+    seen.stop = function () { document.removeEventListener('click', onClick, true); };
+    return seen;
+  }
+
+  // ---------------------------------------------------------------- dialog
+  test('Bridge.dealUi and Bridge.openDealExport exist', function () {
+    ['el', 'button', 'openOverlay', 'closeAll', 'copyField', 'downloadFile', 'canShare', 'shareExport'].forEach(function (n) {
+      assert(typeof B.dealUi[n] === 'function', 'dealUi.' + n);
+    });
+    assert(typeof B.openDealExport === 'function');
+  });
+  test('opens a modal dialog with four format buttons, Code selected, and the code in a read-only box', function () {
+    var s = makeStored(true, true);
+    open(s);
+    eq(overlays().length, 1);
+    eq(dialog().getAttribute('role'), 'dialog');
+    eq(dialog().getAttribute('aria-modal'), 'true');
+    var segs = dialog().querySelectorAll('[data-format]');
+    eq(Array.prototype.map.call(segs, function (b) { return b.textContent; }), ['Code', 'Link', 'JSON', 'PBN']);
+    eq(Array.prototype.map.call(segs, function (b) { return b.getAttribute('aria-pressed'); }), ['true', 'false', 'false', 'false']);
+    eq(field().value, fmt(s, 'code'));
+    assert(field().readOnly);
+  });
+  ['code', 'link', 'json', 'pbn'].forEach(function (f) {
+    test('format ' + f + ': the box shows exactly the exported text and its button is selected', function () {
+      var s = makeStored(true, true);
+      open(s);
+      dialog().querySelector('[data-format="' + f + '"]').click();
+      eq(field().value, fmt(s, f));
+      eq(dialog().querySelector('[data-format="' + f + '"]').getAttribute('aria-pressed'), 'true');
+      eq(dialog().querySelectorAll('[aria-pressed="true"]').length, 1);
+    });
+  });
+  test('the exported text imports back to the same deal (lead included) from what the box shows', function () {
+    var s = makeStored(true, true);
+    open(s);
+    ['code', 'link', 'json', 'pbn'].forEach(function (f) {
+      dialog().querySelector('[data-format="' + f + '"]').click();
+      var back = B.readDealText(field().value).stored;
+      eq(back.id, s.id, f);
+      eq(back.lead, s.lead, f + ' lead');
+    });
+  });
+  test('the link uses the given base address; the file:// note appears only when open from a file', function () {
+    open(makeStored(false, false));
+    dialog().querySelector('[data-format="link"]').click();
+    assert(field().value.indexOf(BASE + '#BP1:') === 0, field().value);
+    var note = dialog().querySelector('.sd-note').textContent;
+    eq(/only works on this device/.test(note), window.location.protocol === 'file:');
+    dialog().querySelector('[data-format="json"]').click();
+    assert(!/only works on this device/.test(dialog().querySelector('.sd-note').textContent), 'note should be link-only');
+  });
+  test('Close, Escape and a tap outside the box each close the dialog', function () {
+    var h = open(makeStored(false, false));
+    find('Close').click();
+    eq(overlays().length, 0);
+    open(makeStored(false, false));
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    eq(overlays().length, 0, 'escape');
+    open(makeStored(false, false));
+    document.querySelector('.sd-overlay').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    eq(overlays().length, 0, 'backdrop');
+    h.close();   // closing twice is harmless
+  });
+  test('a tap inside the box does not close it', function () {
+    open(makeStored(false, false));
+    dialog().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    eq(overlays().length, 1);
+  });
+  test('an invalid deal shows an error, empties the box and disables Copy, Download and Share', function () {
+    stubNav('share', function () { return Promise.resolve(); });
+    var bad = makeStored(false, false);
+    bad.deal.N.pop();
+    open(bad);
+    assert(/Cannot export/.test(dialog().querySelector('.sd-error').textContent));
+    eq(field().value, '');
+    assert(find('Copy').disabled && find('Download').disabled && find('Share…').disabled);
+  });
+
+  // ---------------------------------------------------------------- copy
+  test('copy uses navigator.clipboard when it works', function () {
+    var got = null;
+    stubNav('clipboard', { writeText: function (t) { got = t; return Promise.resolve(); } });
+    var s = makeStored(true, false);
+    open(s);
+    find('Copy').click();
+    return tick().then(function () {
+      eq(got, fmt(s, 'code'));
+      eq(status().textContent, 'Copied.');
+    });
+  });
+  test('copy falls back to selecting the text and execCommand when there is no clipboard API', function () {
+    stubNav('clipboard', undefined);
+    var called = 0;
+    stubOnce(document, 'execCommand', function (c) { called++; return c === 'copy'; }, 'exec');
+    open(makeStored(false, false));
+    find('Copy').click();
+    eq(called, 1);
+    eq(status().textContent, 'Copied.');
+    eq(field().selectionStart, 0);
+    eq(field().selectionEnd, field().value.length);
+  });
+  test('copy falls back when the clipboard promise rejects (as on file://)', function () {
+    stubNav('clipboard', { writeText: function () { return Promise.reject(new Error('blocked')); } });
+    stubOnce(document, 'execCommand', function () { return true; }, 'exec');
+    open(makeStored(false, false));
+    find('Copy').click();
+    return tick().then(function () { eq(status().textContent, 'Copied.'); });
+  });
+  test('copy falls back when writeText throws at once', function () {
+    stubNav('clipboard', { writeText: function () { throw new Error('nope'); } });
+    stubOnce(document, 'execCommand', function () { return true; }, 'exec');
+    open(makeStored(false, false));
+    find('Copy').click();
+    eq(status().textContent, 'Copied.');
+  });
+  test('if every copy route fails the text stays selected and the person is told to copy by hand', function () {
+    stubNav('clipboard', undefined);
+    stubOnce(document, 'execCommand', function () { return false; }, 'exec');
+    open(makeStored(false, false));
+    dialog().querySelector('[data-format="pbn"]').click();
+    find('Copy').click();
+    assert(/selected/.test(status().textContent), status().textContent);
+    eq(field().selectionEnd, field().value.length);
+  });
+  test('switching format clears an old status message', function () {
+    stubNav('clipboard', undefined);
+    stubOnce(document, 'execCommand', function () { return true; }, 'exec');
+    open(makeStored(false, false));
+    find('Copy').click();
+    eq(status().textContent, 'Copied.');
+    dialog().querySelector('[data-format="json"]').click();
+    eq(status().textContent, '');
+  });
+
+  // ---------------------------------------------------------------- download
+  ['code', 'link', 'json', 'pbn'].forEach(function (f) {
+    test('download ' + f + ': a file with the right name, type and content', function () {
+      var seen = captureDownloads();
+      var blobs = [];
+      stubOnce(URL, 'createObjectURL', function (b) { blobs.push(b); return 'blob:test'; }, 'cou');
+      stubOnce(URL, 'revokeObjectURL', function () {}, 'rou');
+      var s = makeStored(true, true);
+      open(s);
+      dialog().querySelector('[data-format="' + f + '"]').click();
+      find('Download').click();
+      seen.stop();
+      eq(seen.length, 1);
+      var e = B.exportDealText(s, f, BASE);
+      eq(seen[0].name, e.filename);
+      eq(seen[0].href, 'blob:test');
+      assert(/Download started/.test(status().textContent));
+      eq(blobs[0].type.split(';')[0], e.mime.split(';')[0]);
+      return new Promise(function (resolve) {
+        var r = new FileReader();
+        r.onload = function () { resolve(r.result); };
+        r.readAsText(blobs[0]);
+      }).then(function (text) { eq(text, e.text); });
+    });
+  });
+  test('download that cannot start says so and points at Copy', function () {
+    stubOnce(URL, 'createObjectURL', function () { throw new Error('no'); }, 'cou');
+    open(makeStored(false, false));
+    find('Download').click();
+    assert(/Download is not available/.test(status().textContent), status().textContent);
+  });
+
+  // ---------------------------------------------------------------- share sheet
+  test('no Share button when the browser has no share sheet', function () {
+    stubNav('share', undefined);
+    open(makeStored(false, false));
+    eq(find('Share…'), null);
+  });
+  test('Share button appears when navigator.share exists', function () {
+    stubNav('share', function () { return Promise.resolve(); });
+    open(makeStored(false, false));
+    assert(find('Share…'));
+  });
+  test('code is shared as text', function () {
+    var arg = null;
+    stubNav('share', function (d) { arg = d; return Promise.resolve(); });
+    var s = makeStored(true, false);
+    open(s);
+    find('Share…').click();
+    eq(arg.text, fmt(s, 'code'));
+    assert(!arg.files && !arg.url);
+    return tick().then(function () { eq(status().textContent, 'Shared.'); });
+  });
+  test('an https link is shared as a url', function () {
+    var arg = null;
+    stubNav('share', function (d) { arg = d; return Promise.resolve(); });
+    var s = makeStored(false, false);
+    open(s);
+    dialog().querySelector('[data-format="link"]').click();
+    find('Share…').click();
+    eq(arg.url, fmt(s, 'link'));
+    assert(!arg.text);
+  });
+  test('JSON and PBN are shared as a file when the browser can share files', function () {
+    var args = [];
+    stubNav('share', function (d) { args.push(d); return Promise.resolve(); });
+    stubNav('canShare', function (d) { return !!(d && d.files && d.files.length); });
+    var s = makeStored(true, true);
+    open(s);
+    ['json', 'pbn'].forEach(function (f) {
+      dialog().querySelector('[data-format="' + f + '"]').click();
+      find('Share…').click();
+      var e = B.exportDealText(s, f, BASE);
+      var d = args[args.length - 1];
+      eq(d.files.length, 1, f);
+      eq(d.files[0].name, e.filename, f + ' name');
+      eq(d.files[0].type, e.mime.split(';')[0], f + ' type');
+    });
+  });
+  test('JSON and PBN are shared as text when files cannot be shared', function () {
+    var arg = null;
+    stubNav('share', function (d) { arg = d; return Promise.resolve(); });
+    stubNav('canShare', function () { return false; });
+    var s = makeStored(false, true);
+    open(s);
+    dialog().querySelector('[data-format="pbn"]').click();
+    find('Share…').click();
+    eq(arg.text, fmt(s, 'pbn'));
+    assert(!arg.files);
+  });
+  test('JSON and PBN are shared as text when canShare does not exist', function () {
+    var arg = null;
+    stubNav('share', function (d) { arg = d; return Promise.resolve(); });
+    stubNav('canShare', undefined);
+    var s = makeStored(false, true);
+    open(s);
+    dialog().querySelector('[data-format="json"]').click();
+    find('Share…').click();
+    eq(arg.text, fmt(s, 'json'));
+  });
+  test('cancelling the share sheet is silent', function () {
+    stubNav('share', function () { var e = new Error('cancel'); e.name = 'AbortError'; return Promise.reject(e); });
+    open(makeStored(false, false));
+    find('Share…').click();
+    return tick().then(function () { eq(status().textContent, ''); });
+  });
+  test('a share sheet that fails points at Copy and Download', function () {
+    stubNav('share', function () { return Promise.reject(new Error('boom')); });
+    open(makeStored(false, false));
+    find('Share…').click();
+    return tick().then(function () { assert(/Copy or Download/.test(status().textContent), status().textContent); });
+  });
+  test('a share sheet that throws at once is handled the same way', function () {
+    stubNav('share', function () { throw new Error('boom'); });
+    open(makeStored(false, false));
+    find('Share…').click();
+    assert(/Copy or Download/.test(status().textContent), status().textContent);
+  });
+
+  // ---------------------------------------------------------------- overlay helper (used by the editor)
+  test('openOverlay: onRequestClose replaces closing for Escape and backdrop; close() still closes and calls onClose', function () {
+    var asked = 0, closed = 0;
+    var h = B.dealUi.openOverlay('Test', { onRequestClose: function () { asked++; }, onClose: function () { closed++; } });
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    h.overlay.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    eq(asked, 2); eq(overlays().length, 1);
+    h.close();
+    eq(overlays().length, 0); eq(closed, 1);
+    h.close(); eq(closed, 1, 'second close does nothing');
+  });
+  test('openOverlay: closeOnBackdrop false ignores backdrop taps; the top dialog gets Escape first', function () {
+    var a = B.dealUi.openOverlay('A', { closeOnBackdrop: false });
+    a.overlay.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    eq(overlays().length, 1);
+    var b = B.dealUi.openOverlay('B');
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    eq(overlays().length, 1, 'only the top one closed');
+    assert(a.overlay.parentNode, 'A should still be open');
+    assert(!b.overlay.parentNode, 'B should be closed');
+  });
+
+  // ---------------------------------------------------------------- run
+  var passed = 0, failed = 0;
+  var chain = Promise.resolve();
+  queue.forEach(function (t) {
+    chain = chain.then(function () {
+      var li = document.createElement('li');
+      li.textContent = t.name;
+      return Promise.resolve().then(t.fn).then(function () {
+        li.className = 'pass'; passed++;
+      }, function (e) {
+        li.className = 'fail'; failed++;
+        var d = document.createElement('span');
+        d.className = 'detail';
+        d.textContent = e && e.message ? e.message : String(e);
+        li.appendChild(d);
+      }).then(function () {
+        restore();
+        results.appendChild(li);
+      });
+    });
+  });
+  chain.then(function () {
+    var s = document.getElementById('summary');
+    s.textContent = (failed === 0 ? 'ALL PASS: ' : 'FAILURES: ') + passed + ' passed, ' + failed + ' failed';
+    s.style.color = failed === 0 ? '#0a7a2f' : '#b00020';
+  });
+})();
+</script>
+</body>
+</html>
